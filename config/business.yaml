@@ -1,0 +1,29 @@
+# Configuración del negocio — Generado por AgentKit
+negocio:
+  nombre: "TODO HOGAR FLORENCIA"
+  descripcion: >
+    Venta de muebles para el hogar, especialmente clósets y escritorios,
+    fabricados en madera aglomerada recubierta en lámina de melamina.
+    Catálogo en varios acabados (roble claro, blanco, nogal/café oscuro y beige):
+    clósets de 2 puertas con ruedas, barra para colgar y entrepaños;
+    clósets de 3 puertas con cajones; clósets grandes de 6 puertas con cajones;
+    y muebles tipo organizador / biblioteca con puertas y entrepaños.
+  horario: "Lunes a Sábado de 8:00am a 6:00pm (jornada continua)"
+  direccion: >
+    Barrio Rincón de la Estrella, Calle 16 #2B-32, subiendo por el Bolívar,
+    por la parte posterior de la Universidad de la Amazonia.
+  ciudad: "Florencia, Caquetá"
+  ubicacion_maps: "https://www.google.com/maps?q=1.6227651,-75.600869"
+  coordenadas: "1.6227651, -75.600869"
+
+agente:
+  nombre: "JHON"
+  tono: "Amigable y casual, vendedor y persuasivo, empático y cálido"
+  casos_de_uso:
+    - "Responder preguntas frecuentes"
+    - "Tomar pedidos"
+    - "Soporte post-venta"
+
+metadata:
+  creado: "2026-05-31"
+  version: "1.0"
