@@ -18,8 +18,12 @@ load_dotenv()
 # Configuración de base de datos
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///./agentkit.db")
 
-# Si es PostgreSQL en producción, ajustar el esquema de URL
-if DATABASE_URL.startswith("postgresql://"):
+# Si es PostgreSQL en producción, ajustar el esquema de URL para usar el driver
+# asíncrono asyncpg. Railway puede entregar la URL como "postgres://" o
+# "postgresql://"; ambas se normalizan a "postgresql+asyncpg://".
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql+asyncpg://", 1)
+elif DATABASE_URL.startswith("postgresql://"):
     DATABASE_URL = DATABASE_URL.replace("postgresql://", "postgresql+asyncpg://", 1)
 
 engine = create_async_engine(DATABASE_URL, echo=False)
@@ -68,6 +72,10 @@ class MensajeBot(Base):
 
 async def inicializar_db():
     """Crea las tablas si no existen."""
+    import logging
+    logging.getLogger("agentkit").info(
+        f"Base de datos: motor '{engine.dialect.name}' (host: {engine.url.host or 'local'})"
+    )
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
