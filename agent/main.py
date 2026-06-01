@@ -16,6 +16,7 @@ from dotenv import load_dotenv
 from agent.brain import generar_respuesta
 from agent.memory import inicializar_db, guardar_mensaje, obtener_historial
 from agent.providers import obtener_proveedor
+from agent.cloudinary_images import detectar_categoria, obtener_imagenes, CATEGORIAS
 
 load_dotenv()
 
@@ -101,29 +102,55 @@ async def webhook_handler(request: Request):
 
             if solicita_imagen:
                 logger.info(f"Solicitud de imagen detectada de {msg.telefono}: {msg.texto}")
-                logger.info(f"Intentando enviar imagen a {msg.telefono}")
-                enviada = await proveedor.enviar_imagen(
-                    msg.telefono,
-                    "https://res.cloudinary.com/dn8arwqww/image/upload/v1780266202/WhatsApp_Image_2026-05-31_at_1.10.56_PM_vnmb5j.jpg",
-                    "Aquí tienes uno de nuestros clósets."
-                )
-                logger.info(f"Resultado de enviar_imagen a {msg.telefono}: {enviada}")
 
-                # Si la imagen se envió bien, NO generamos respuesta de texto:
-                # el único mensaje que recibe el usuario es la imagen con su caption.
-                if enviada:
-                    logger.info(f"Imagen enviada correctamente a {msg.telefono}")
-                    # Guardamos el mensaje del usuario y registramos la imagen como
-                    # respuesta del agente para conservar el contexto de la conversación.
+                # Detectar a qué categoría/carpeta de Cloudinary se refiere.
+                categoria = detectar_categoria(msg.texto)
+
+                if not categoria:
+                    # Pidió fotos pero sin especificar categoría: ofrecemos las opciones.
+                    logger.info(f"Solicitud sin categoría de {msg.telefono}; se ofrecen opciones")
+                    opciones = "\n".join(f"• {c.replace('_', ' ')}" for c in CATEGORIAS)
+                    mensaje_opciones = (
+                        "¡Con gusto! ¿Qué te gustaría ver? Tenemos:\n"
+                        f"{opciones}\n\n"
+                        "Escríbeme la categoría que prefieras."
+                    )
                     await guardar_mensaje(msg.telefono, "user", msg.texto)
-                    await guardar_mensaje(msg.telefono, "assistant", "[imagen enviada: clóset]")
+                    await guardar_mensaje(msg.telefono, "assistant", mensaje_opciones)
+                    await proveedor.enviar_mensaje(msg.telefono, mensaje_opciones)
+                    continue
+
+                # Consultar las imágenes de esa carpeta en Cloudinary.
+                logger.info(f"Intentando enviar imágenes de '{categoria}' a {msg.telefono}")
+                urls = await obtener_imagenes(categoria)
+                caption = f"Modelos de {categoria.replace('_', ' ')}"
+
+                enviadas = 0
+                for url_imagen in urls:
+                    if await proveedor.enviar_imagen(msg.telefono, url_imagen, caption):
+                        enviadas += 1
+                logger.info(
+                    f"Resultado de enviar_imagen a {msg.telefono}: "
+                    f"{enviadas}/{len(urls)} imágenes de '{categoria}'"
+                )
+
+                # Si se envió al menos una imagen, NO generamos respuesta de texto:
+                # los únicos mensajes que recibe el usuario son las imágenes con su caption.
+                if enviadas > 0:
+                    logger.info(f"Imágenes enviadas correctamente a {msg.telefono}")
+                    await guardar_mensaje(msg.telefono, "user", msg.texto)
+                    await guardar_mensaje(
+                        msg.telefono, "assistant", f"[{enviadas} imágenes enviadas: {categoria}]"
+                    )
                     logger.info(
-                        f"Se omite generación de respuesta porque ya se envió una imagen a {msg.telefono}"
+                        f"Se omite generación de respuesta porque ya se enviaron imágenes a {msg.telefono}"
                     )
                     continue
-                # Si falló el envío, seguimos al flujo normal para responder con texto.
+
+                # Si no se pudo enviar ninguna imagen, seguimos al flujo normal de texto.
                 logger.warning(
-                    f"El envío de imagen a {msg.telefono} falló; se continúa con respuesta de texto"
+                    f"No se enviaron imágenes de '{categoria}' a {msg.telefono}; "
+                    "se continúa con respuesta de texto"
                 )
 
             # Generar respuesta con Claude
