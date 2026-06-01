@@ -81,8 +81,16 @@ async def webhook_handler(request: Request):
 
             # Obtener historial ANTES de guardar el mensaje actual
             # (brain.py agrega el mensaje actual, evitando duplicados)
-            historial = await obtener_historial(msg.telefono)
 
+            historial = await obtener_historial(msg.telefono)
+            texto_lower = msg.texto.lower()
+
+            if "foto" in texto_lower or "fotos" in texto_lower or "imagen" in texto_lower or "imagenes" in texto_lower:
+                await proveedor.enviar_imagen(
+                    msg.telefono,
+                    "https://res.cloudinary.com/dn8arwqww/image/upload/v1780266202/WhatsApp_Image_2026-05-31_at_1.10.56_PM_vnmb5j.jpg",
+                    "Aquí tienes uno de nuestros clósets."
+                )
             # Generar respuesta con Claude
             respuesta = await generar_respuesta(msg.texto, historial)
 
