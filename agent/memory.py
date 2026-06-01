@@ -10,7 +10,7 @@ import os
 from datetime import datetime, timedelta
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy import String, Text, DateTime, select, Integer
+from sqlalchemy import String, Text, DateTime, select, delete, Integer
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -53,6 +53,19 @@ class ChatEstado(Base):
     human_takeover_until: Mapped[datetime] = mapped_column(DateTime, nullable=True)
 
 
+class MensajeBot(Base):
+    """
+    IDs de los mensajes que envió el PROPIO bot. Whapi reenvía por webhook los
+    mensajes salientes (from_me=true), así que registramos aquí los que envía el
+    bot para distinguir su eco de los mensajes que el dueño escribe a mano.
+    Se persiste en la BD para que sobreviva reinicios del contenedor.
+    """
+    __tablename__ = "mensajes_bot"
+
+    mensaje_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 async def inicializar_db():
     """Crea las tablas si no existen."""
     async with engine.begin() as conn:
@@ -92,6 +105,32 @@ async def modo_humano_activo(telefono: str) -> bool:
         if estado is None or estado.human_takeover_until is None:
             return False
         return datetime.utcnow() < estado.human_takeover_until
+
+
+# Días que conservamos los IDs de mensajes del bot (solo se necesitan unos
+# segundos, hasta que llega el eco por webhook; 2 días es un margen amplio).
+DIAS_RETENER_IDS_BOT = 2
+
+
+async def registrar_mensaje_bot(mensaje_id: str):
+    """Persiste en la BD el id de un mensaje enviado por el bot (para ignorar su eco)."""
+    if not mensaje_id:
+        return
+    async with async_session() as session:
+        if await session.get(MensajeBot, mensaje_id) is None:
+            session.add(MensajeBot(mensaje_id=mensaje_id, timestamp=datetime.utcnow()))
+        # Limpieza: borramos ids viejos para que la tabla no crezca indefinidamente.
+        limite = datetime.utcnow() - timedelta(days=DIAS_RETENER_IDS_BOT)
+        await session.execute(delete(MensajeBot).where(MensajeBot.timestamp < limite))
+        await session.commit()
+
+
+async def fue_mensaje_de_bot(mensaje_id: str) -> bool:
+    """True si el id corresponde a un mensaje enviado por el bot (consulta a la BD)."""
+    if not mensaje_id:
+        return False
+    async with async_session() as session:
+        return await session.get(MensajeBot, mensaje_id) is not None
 
 
 async def guardar_mensaje(telefono: str, role: str, content: str):

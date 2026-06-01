@@ -21,6 +21,7 @@ import httpx
 from collections import deque
 from fastapi import Request
 from agent.providers.base import ProveedorWhatsApp, MensajeEntrante
+from agent.memory import registrar_mensaje_bot, fue_mensaje_de_bot
 
 logger = logging.getLogger("agentkit")
 
@@ -35,23 +36,34 @@ class ProveedorWhapi(ProveedorWhatsApp):
         # solo, así que cuando el bot responde, Whapi reenvía ese mensaje como un
         # evento from_me=true. Registramos esos IDs para distinguir los ecos del
         # bot de los mensajes que el dueño escribe a mano (esos sí activan modo humano).
+        # Se PERSISTEN en la BD (tabla mensajes_bot) para sobrevivir reinicios del
+        # contenedor; este set/deque es solo un caché en memoria de acceso rápido.
         self._ids_bot = deque()        # orden de llegada (para acotar tamaño)
         self._ids_bot_set = set()      # búsqueda rápida por id
         self._MAX_IDS_BOT = 1000
 
-    def _registrar_envio_bot(self, mensaje_id: str) -> None:
-        """Recuerda que el bot envió el mensaje con este id (para ignorar su eco)."""
-        if not mensaje_id or mensaje_id in self._ids_bot_set:
+    async def _registrar_envio_bot(self, mensaje_id: str) -> None:
+        """Recuerda que el bot envió el mensaje con este id (caché + BD persistente)."""
+        if not mensaje_id:
             return
-        self._ids_bot.append(mensaje_id)
-        self._ids_bot_set.add(mensaje_id)
-        while len(self._ids_bot) > self._MAX_IDS_BOT:
-            viejo = self._ids_bot.popleft()
-            self._ids_bot_set.discard(viejo)
+        # Caché en memoria (rápido).
+        if mensaje_id not in self._ids_bot_set:
+            self._ids_bot.append(mensaje_id)
+            self._ids_bot_set.add(mensaje_id)
+            while len(self._ids_bot) > self._MAX_IDS_BOT:
+                viejo = self._ids_bot.popleft()
+                self._ids_bot_set.discard(viejo)
+        # Persistencia en BD (sobrevive reinicios).
+        await registrar_mensaje_bot(mensaje_id)
 
-    def fue_enviado_por_bot(self, mensaje_id: str) -> bool:
+    async def fue_enviado_por_bot(self, mensaje_id: str) -> bool:
         """True si el mensaje (por id) lo envió el propio bot, no un humano."""
-        return bool(mensaje_id) and mensaje_id in self._ids_bot_set
+        if not mensaje_id:
+            return False
+        # Primero el caché en memoria; si no está (p.ej. tras un reinicio), la BD.
+        if mensaje_id in self._ids_bot_set:
+            return True
+        return await fue_mensaje_de_bot(mensaje_id)
 
     @staticmethod
     def _extraer_id_respuesta(data: dict) -> str:
@@ -88,7 +100,7 @@ class ProveedorWhapi(ProveedorWhatsApp):
             # Detectamos el eco del bot por id conocido o por source == "api".
             if from_me:
                 es_eco_bot = (
-                    self.fue_enviado_por_bot(mensaje_id)
+                    await self.fue_enviado_por_bot(mensaje_id)
                     or msg.get("source") == "api"
                 )
                 if es_eco_bot:
@@ -140,7 +152,7 @@ class ProveedorWhapi(ProveedorWhatsApp):
                 return False
             # Registramos el id del mensaje enviado por el bot para ignorar su eco.
             try:
-                self._registrar_envio_bot(self._extraer_id_respuesta(r.json()))
+                await self._registrar_envio_bot(self._extraer_id_respuesta(r.json()))
             except Exception:
                 pass
             return True
@@ -170,7 +182,7 @@ class ProveedorWhapi(ProveedorWhatsApp):
                 return False
             # Registramos el id de la imagen enviada por el bot para ignorar su eco.
             try:
-                self._registrar_envio_bot(self._extraer_id_respuesta(r.json()))
+                await self._registrar_envio_bot(self._extraer_id_respuesta(r.json()))
             except Exception:
                 pass
             return True
