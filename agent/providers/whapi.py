@@ -41,12 +41,16 @@ class ProveedorWhapi(ProveedorWhatsApp):
             if msg.get("type") != "text":
                 continue
 
-            # El número del remitente: campo "from" (solo dígitos).
-            # Si no viene, lo extraemos del chat_id (ej: "573001112233@s.whatsapp.net")
-            telefono = msg.get("from", "")
+            # Identificamos la conversación por el cliente (la otra parte del chat).
+            # Usamos chat_id porque es el mismo en ambos sentidos:
+            #   - Entrante: chat_id = cliente, from = cliente
+            #   - Saliente (from_me): chat_id = cliente, from = NUESTRO número
+            # Si usáramos "from" en los mensajes propios, guardaríamos el modo
+            # humano con nuestro número y nunca coincidiría con el del cliente.
+            chat_id = msg.get("chat_id", "")
+            telefono = chat_id.split("@")[0] if "@" in chat_id else chat_id
             if not telefono:
-                chat_id = msg.get("chat_id", "")
-                telefono = chat_id.split("@")[0] if "@" in chat_id else chat_id
+                telefono = msg.get("from", "")
 
             texto = msg.get("text", {}).get("body", "")
 

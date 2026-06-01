@@ -14,7 +14,13 @@ from fastapi.responses import PlainTextResponse
 from dotenv import load_dotenv
 
 from agent.brain import generar_respuesta
-from agent.memory import inicializar_db, guardar_mensaje, obtener_historial
+from agent.memory import (
+    inicializar_db,
+    guardar_mensaje,
+    obtener_historial,
+    activar_modo_humano,
+    modo_humano_activo,
+)
 from agent.providers import obtener_proveedor
 from agent.cloudinary_images import (
     detectar_categoria,
@@ -96,9 +102,35 @@ async def webhook_handler(request: Request):
         mensajes = await proveedor.parsear_webhook(request)
 
         for msg in mensajes:
-            # Ignorar mensajes propios o vacíos
-            if msg.es_propio or not msg.texto:
+            # Ignorar mensajes vacíos
+            if not msg.texto:
                 continue
+
+            # ── MODO HUMANO ───────────────────────────────────────────────
+            # 1) Si el mensaje lo envié YO (el dueño, from_me=true), activo o
+            #    extiendo el modo humano 24h y dejo que el bot quede en silencio.
+            if msg.es_propio:
+                hasta = await activar_modo_humano(msg.telefono)
+                # Guardo lo que escribí como turno del agente, para mantener el
+                # contexto cuando el bot retome la conversación.
+                await guardar_mensaje(msg.telefono, "assistant", msg.texto)
+                logger.info(
+                    f"Modo humano activado/extendido para {msg.telefono} "
+                    f"hasta {hasta.isoformat()} UTC (24h desde mi último mensaje)"
+                )
+                continue
+
+            # 2) Si el chat está en modo humano, el bot NO responde: ni Claude,
+            #    ni imágenes, ni texto. Solo guardo el mensaje del cliente para
+            #    conservar el historial. A las 24h modo_humano_activo() da False.
+            if await modo_humano_activo(msg.telefono):
+                await guardar_mensaje(msg.telefono, "user", msg.texto)
+                logger.info(
+                    f"Modo humano ACTIVO para {msg.telefono}: bot en silencio, "
+                    f"no se responde a: {msg.texto}"
+                )
+                continue
+            # ──────────────────────────────────────────────────────────────
 
             logger.info(f"Mensaje de {msg.telefono}: {msg.texto}")
 

@@ -7,7 +7,7 @@ por número de teléfono usando SQLite (local) o PostgreSQL (producción).
 """
 
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy import String, Text, DateTime, select, Integer
@@ -41,10 +41,57 @@ class Mensaje(Base):
     timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class ChatEstado(Base):
+    """
+    Estado por chat. Aquí guardamos el "modo humano" (human_takeover):
+    cuando el dueño del negocio responde manualmente, el bot se silencia
+    en ese chat hasta `human_takeover_until` (fecha en UTC).
+    """
+    __tablename__ = "chat_estado"
+
+    telefono: Mapped[str] = mapped_column(String(50), primary_key=True)
+    human_takeover_until: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+
+
 async def inicializar_db():
     """Crea las tablas si no existen."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+
+# Horas que dura el modo humano desde el último mensaje del dueño.
+HORAS_MODO_HUMANO = 24
+
+
+async def activar_modo_humano(telefono: str, horas: int = HORAS_MODO_HUMANO):
+    """
+    Activa (o extiende) el modo humano para un chat: el bot quedará en silencio
+    hasta dentro de `horas` horas a partir de AHORA. Llamar cada vez que el dueño
+    envía un mensaje reinicia el contador a 24 horas desde ese último mensaje.
+    """
+    nueva_fecha = datetime.utcnow() + timedelta(hours=horas)
+    async with async_session() as session:
+        estado = await session.get(ChatEstado, telefono)
+        if estado is None:
+            estado = ChatEstado(telefono=telefono, human_takeover_until=nueva_fecha)
+            session.add(estado)
+        else:
+            estado.human_takeover_until = nueva_fecha
+        await session.commit()
+    return nueva_fecha
+
+
+async def modo_humano_activo(telefono: str) -> bool:
+    """
+    Devuelve True si el chat está en modo humano (el bot debe permanecer en
+    silencio). Si ya pasaron las 24 horas desde el último mensaje del dueño,
+    retorna False automáticamente (reactivación del bot sin tarea programada).
+    """
+    async with async_session() as session:
+        estado = await session.get(ChatEstado, telefono)
+        if estado is None or estado.human_takeover_until is None:
+            return False
+        return datetime.utcnow() < estado.human_takeover_until
 
 
 async def guardar_mensaje(telefono: str, role: str, content: str):
