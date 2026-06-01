@@ -20,7 +20,10 @@ from agent.cloudinary_images import (
     detectar_categoria,
     obtener_imagenes,
     solicita_catalogo_completo,
+    solicita_todos_closets,
     CATEGORIAS,
+    CATEGORIAS_CLOSETS,
+    MAX_IMAGENES_POR_RESPUESTA,
 )
 
 load_dotenv()
@@ -114,14 +117,24 @@ async def webhook_handler(request: Request):
             if solicita_imagen:
                 logger.info(f"Solicitud de imagen detectada de {msg.telefono}: {msg.texto}")
 
-                # ¿Pide el catálogo completo? Entonces enviamos de TODAS las carpetas.
-                # Si no, detectamos la categoría/carpeta específica que mencionó.
+                # Decidir qué carpetas enviar y si es una "muestra" (1 por carpeta)
+                # o todas las imágenes de una sola categoría.
+                #   - Catálogo completo  -> muestra de TODAS las carpetas
+                #   - Todos los closets  -> muestra de las carpetas de clóset
+                #   - Categoría puntual  -> hasta 5 imágenes de esa carpeta
                 if solicita_catalogo_completo(msg.texto):
                     categorias_a_enviar = list(CATEGORIAS)
-                    logger.info(f"Solicitud de catálogo completo de {msg.telefono}")
+                    modo_muestra = True
+                    logger.info(f"Categoría detectada: catálogo completo {categorias_a_enviar}")
+                elif solicita_todos_closets(msg.texto):
+                    categorias_a_enviar = list(CATEGORIAS_CLOSETS)
+                    modo_muestra = True
+                    logger.info(f"Categoría detectada: todos los closets {categorias_a_enviar}")
                 else:
                     categoria = detectar_categoria(msg.texto)
                     categorias_a_enviar = [categoria] if categoria else []
+                    modo_muestra = False
+                    logger.info(f"Categoría detectada: {categoria}")
 
                 if not categorias_a_enviar:
                     # Pidió fotos pero sin especificar categoría: ofrecemos las opciones.
@@ -137,23 +150,31 @@ async def webhook_handler(request: Request):
                     await proveedor.enviar_mensaje(msg.telefono, mensaje_opciones)
                     continue
 
-                # Consultar Cloudinary y enviar las imágenes de cada carpeta solicitada.
+                # Construir la lista final de imágenes (URL + caption) respetando el
+                # límite máximo por respuesta para no hacer spam.
+                seleccion = []  # lista de (url, caption)
+                for categoria in categorias_a_enviar:
+                    urls = await obtener_imagenes(categoria, max_resultados=MAX_IMAGENES_POR_RESPUESTA)
+                    logger.info(f"Imágenes encontradas en '{categoria}': {len(urls)}")
+                    caption = f"Modelos de {categoria.replace('_', ' ')}"
+                    # En modo muestra tomamos 1 por carpeta; si no, todas las de la carpeta.
+                    urls_categoria = urls[:1] if modo_muestra else urls
+                    for url_imagen in urls_categoria:
+                        seleccion.append((url_imagen, caption))
+
+                # Recortar al máximo permitido por respuesta.
+                seleccion = seleccion[:MAX_IMAGENES_POR_RESPUESTA]
+
+                # Enviar las imágenes seleccionadas.
                 logger.info(
-                    f"Intentando enviar imágenes a {msg.telefono} de: {categorias_a_enviar}"
+                    f"Intentando enviar {len(seleccion)} imágenes a {msg.telefono} "
+                    f"(máx {MAX_IMAGENES_POR_RESPUESTA}) de: {categorias_a_enviar}"
                 )
                 enviadas = 0
-                total = 0
-                for categoria in categorias_a_enviar:
-                    urls = await obtener_imagenes(categoria)
-                    total += len(urls)
-                    caption = f"Modelos de {categoria.replace('_', ' ')}"
-                    for url_imagen in urls:
-                        if await proveedor.enviar_imagen(msg.telefono, url_imagen, caption):
-                            enviadas += 1
-                logger.info(
-                    f"Resultado de enviar_imagen a {msg.telefono}: "
-                    f"{enviadas}/{total} imágenes de {categorias_a_enviar}"
-                )
+                for url_imagen, caption in seleccion:
+                    if await proveedor.enviar_imagen(msg.telefono, url_imagen, caption):
+                        enviadas += 1
+                logger.info(f"Imágenes enviadas a {msg.telefono}: {enviadas}/{len(seleccion)}")
 
                 # Si se envió al menos una imagen, NO generamos respuesta de texto:
                 # los únicos mensajes que recibe el usuario son las imágenes con su caption.

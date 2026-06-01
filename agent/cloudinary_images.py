@@ -39,6 +39,12 @@ CATEGORIAS = [
     "mesa de tv",
 ]
 
+# Solo las carpetas de clósets (para "todos los closets").
+CATEGORIAS_CLOSETS = [c for c in CATEGORIAS if c.startswith("closet")]
+
+# Máximo de imágenes a enviar en una sola respuesta (evita spam).
+MAX_IMAGENES_POR_RESPUESTA = 5
+
 # Palabras/frases que disparan cada categoría cuando el cliente escribe.
 PALABRAS_POR_CATEGORIA = {
     "closet_2_puertas": ["2 puertas", "dos puertas", "closet de 2", "clóset de 2"],
@@ -60,10 +66,24 @@ PALABRAS_CATALOGO_COMPLETO = [
 ]
 
 
+# Frases que piden todos los clósets (muestra de cada carpeta de clóset).
+PALABRAS_TODOS_CLOSETS = [
+    "todos los closets", "todos los clósets", "todos los closet", "todos los clóset",
+    "todos los closets", "todas las closets",
+    "todos los armarios", "todos los modelos de closet",
+]
+
+
 def solicita_catalogo_completo(texto: str) -> bool:
     """True si el cliente pide el catálogo completo / todos los diseños / modelos."""
     texto_lower = texto.lower()
     return any(frase in texto_lower for frase in PALABRAS_CATALOGO_COMPLETO)
+
+
+def solicita_todos_closets(texto: str) -> bool:
+    """True si el cliente pide ver todos los clósets (muestra de cada carpeta)."""
+    texto_lower = texto.lower()
+    return any(frase in texto_lower for frase in PALABRAS_TODOS_CLOSETS)
 
 
 def detectar_categoria(texto: str) -> str | None:
