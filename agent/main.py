@@ -16,7 +16,12 @@ from dotenv import load_dotenv
 from agent.brain import generar_respuesta
 from agent.memory import inicializar_db, guardar_mensaje, obtener_historial
 from agent.providers import obtener_proveedor
-from agent.cloudinary_images import detectar_categoria, obtener_imagenes, CATEGORIAS
+from agent.cloudinary_images import (
+    detectar_categoria,
+    obtener_imagenes,
+    solicita_catalogo_completo,
+    CATEGORIAS,
+)
 
 load_dotenv()
 
@@ -98,40 +103,56 @@ async def webhook_handler(request: Request):
                 "ver catalogo", "ver catálogo", "catalogo", "catálogo",
                 "closet", "closets", "clóset", "clósets",
             )
-            solicita_imagen = any(palabra in texto_lower for palabra in palabras_imagen)
+            # Se considera solicitud de imagen si: usa palabras de "foto/catálogo",
+            # menciona una categoría concreta, o pide el catálogo completo.
+            solicita_imagen = (
+                any(palabra in texto_lower for palabra in palabras_imagen)
+                or detectar_categoria(msg.texto) is not None
+                or solicita_catalogo_completo(msg.texto)
+            )
 
             if solicita_imagen:
                 logger.info(f"Solicitud de imagen detectada de {msg.telefono}: {msg.texto}")
 
-                # Detectar a qué categoría/carpeta de Cloudinary se refiere.
-                categoria = detectar_categoria(msg.texto)
+                # ¿Pide el catálogo completo? Entonces enviamos de TODAS las carpetas.
+                # Si no, detectamos la categoría/carpeta específica que mencionó.
+                if solicita_catalogo_completo(msg.texto):
+                    categorias_a_enviar = list(CATEGORIAS)
+                    logger.info(f"Solicitud de catálogo completo de {msg.telefono}")
+                else:
+                    categoria = detectar_categoria(msg.texto)
+                    categorias_a_enviar = [categoria] if categoria else []
 
-                if not categoria:
+                if not categorias_a_enviar:
                     # Pidió fotos pero sin especificar categoría: ofrecemos las opciones.
                     logger.info(f"Solicitud sin categoría de {msg.telefono}; se ofrecen opciones")
                     opciones = "\n".join(f"• {c.replace('_', ' ')}" for c in CATEGORIAS)
                     mensaje_opciones = (
                         "¡Con gusto! ¿Qué te gustaría ver? Tenemos:\n"
                         f"{opciones}\n\n"
-                        "Escríbeme la categoría que prefieras."
+                        "Escríbeme la categoría que prefieras, o pídeme el catálogo completo."
                     )
                     await guardar_mensaje(msg.telefono, "user", msg.texto)
                     await guardar_mensaje(msg.telefono, "assistant", mensaje_opciones)
                     await proveedor.enviar_mensaje(msg.telefono, mensaje_opciones)
                     continue
 
-                # Consultar las imágenes de esa carpeta en Cloudinary.
-                logger.info(f"Intentando enviar imágenes de '{categoria}' a {msg.telefono}")
-                urls = await obtener_imagenes(categoria)
-                caption = f"Modelos de {categoria.replace('_', ' ')}"
-
+                # Consultar Cloudinary y enviar las imágenes de cada carpeta solicitada.
+                logger.info(
+                    f"Intentando enviar imágenes a {msg.telefono} de: {categorias_a_enviar}"
+                )
                 enviadas = 0
-                for url_imagen in urls:
-                    if await proveedor.enviar_imagen(msg.telefono, url_imagen, caption):
-                        enviadas += 1
+                total = 0
+                for categoria in categorias_a_enviar:
+                    urls = await obtener_imagenes(categoria)
+                    total += len(urls)
+                    caption = f"Modelos de {categoria.replace('_', ' ')}"
+                    for url_imagen in urls:
+                        if await proveedor.enviar_imagen(msg.telefono, url_imagen, caption):
+                            enviadas += 1
                 logger.info(
                     f"Resultado de enviar_imagen a {msg.telefono}: "
-                    f"{enviadas}/{len(urls)} imágenes de '{categoria}'"
+                    f"{enviadas}/{total} imágenes de {categorias_a_enviar}"
                 )
 
                 # Si se envió al menos una imagen, NO generamos respuesta de texto:
@@ -140,7 +161,9 @@ async def webhook_handler(request: Request):
                     logger.info(f"Imágenes enviadas correctamente a {msg.telefono}")
                     await guardar_mensaje(msg.telefono, "user", msg.texto)
                     await guardar_mensaje(
-                        msg.telefono, "assistant", f"[{enviadas} imágenes enviadas: {categoria}]"
+                        msg.telefono,
+                        "assistant",
+                        f"[{enviadas} imágenes enviadas: {', '.join(categorias_a_enviar)}]",
                     )
                     logger.info(
                         f"Se omite generación de respuesta porque ya se enviaron imágenes a {msg.telefono}"
@@ -149,7 +172,7 @@ async def webhook_handler(request: Request):
 
                 # Si no se pudo enviar ninguna imagen, seguimos al flujo normal de texto.
                 logger.warning(
-                    f"No se enviaron imágenes de '{categoria}' a {msg.telefono}; "
+                    f"No se enviaron imágenes ({categorias_a_enviar}) a {msg.telefono}; "
                     "se continúa con respuesta de texto"
                 )
 

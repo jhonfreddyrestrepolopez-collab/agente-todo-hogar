@@ -26,26 +26,44 @@ import httpx
 
 logger = logging.getLogger("agentkit")
 
-# Categorías disponibles = nombres de carpeta en Cloudinary.
+# Categorías disponibles = nombres EXACTOS de las carpetas en Cloudinary.
 # El orden importa para la detección (lo más específico primero).
+# OJO: "mesa de tv" lleva espacios porque así se llama la carpeta en Cloudinary.
 CATEGORIAS = [
-    "closet_6_puertas",
-    "closet_4_puertas",
+    "closet_2_puertas",
     "closet_3_puertas",
+    "closet_4_puertas",
+    "closet_5_puertas",
+    "closet_6_puertas",
     "escritorios",
-    "organizadores",
-    "cocinas",
+    "mesa de tv",
 ]
 
 # Palabras/frases que disparan cada categoría cuando el cliente escribe.
 PALABRAS_POR_CATEGORIA = {
-    "closet_6_puertas": ["6 puertas", "seis puertas", "closet de 6", "clóset de 6"],
-    "closet_4_puertas": ["4 puertas", "cuatro puertas", "closet de 4", "clóset de 4"],
+    "closet_2_puertas": ["2 puertas", "dos puertas", "closet de 2", "clóset de 2"],
     "closet_3_puertas": ["3 puertas", "tres puertas", "closet de 3", "clóset de 3"],
+    "closet_4_puertas": ["4 puertas", "cuatro puertas", "closet de 4", "clóset de 4"],
+    "closet_5_puertas": ["5 puertas", "cinco puertas", "closet de 5", "clóset de 5"],
+    "closet_6_puertas": ["6 puertas", "seis puertas", "closet de 6", "clóset de 6"],
     "escritorios": ["escritorio", "escritorios"],
-    "organizadores": ["organizador", "organizadores"],
-    "cocinas": ["cocina", "cocinas", "cocina integral"],
+    "mesa de tv": ["mesa de tv", "mesa tv", "mueble de tv", "mesa para tv", "rack de tv"],
 }
+
+# Frases que piden TODO el catálogo (imágenes de todas las carpetas).
+PALABRAS_CATALOGO_COMPLETO = [
+    "catalogo completo", "catálogo completo",
+    "todo el catalogo", "todo el catálogo",
+    "todos los diseños", "todos los disenos", "todos los disenos",
+    "todos los modelos", "todos los productos",
+    "todo lo que tienen", "todo lo que tienes",
+]
+
+
+def solicita_catalogo_completo(texto: str) -> bool:
+    """True si el cliente pide el catálogo completo / todos los diseños / modelos."""
+    texto_lower = texto.lower()
+    return any(frase in texto_lower for frase in PALABRAS_CATALOGO_COMPLETO)
 
 
 def detectar_categoria(texto: str) -> str | None:
