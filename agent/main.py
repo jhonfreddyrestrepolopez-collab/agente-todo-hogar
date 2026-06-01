@@ -46,6 +46,14 @@ async def lifespan(app: FastAPI):
     logger.info("Base de datos inicializada")
     logger.info(f"Servidor AgentKit corriendo en puerto {PORT}")
     logger.info(f"Proveedor de WhatsApp: {proveedor.__class__.__name__}")
+
+    # Diagnóstico temporal: muestra los NOMBRES de las variables de entorno que
+    # contienen "CLOUD" (sin exponer valores). Revela si Railway está pasando las
+    # variables con un nombre distinto (espacios, typos) o si no llegan al proceso.
+    claves_cloud = sorted(k for k in os.environ if "CLOUD" in k.upper())
+    logger.info(f"Variables de entorno con 'CLOUD': {claves_cloud}")
+    for nombre in ("CLOUDINARY_CLOUD_NAME", "CLOUDINARY_API_KEY", "CLOUDINARY_API_SECRET"):
+        logger.info(f"  presente {nombre}: {nombre in os.environ}")
     yield
 
 
