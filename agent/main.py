@@ -85,12 +85,26 @@ async def webhook_handler(request: Request):
             historial = await obtener_historial(msg.telefono)
             texto_lower = msg.texto.lower()
 
-            if "foto" in texto_lower or "fotos" in texto_lower or "imagen" in texto_lower or "imagenes" in texto_lower:
-                await proveedor.enviar_imagen(
+            # Detectar si el cliente está pidiendo fotos/imágenes.
+            # Cubre singular/plural y variantes con y sin acento.
+            palabras_imagen = (
+                "foto", "fotos",
+                "imagen", "imagenes", "imágenes",
+                "enviame imagenes", "envíame imágenes",
+                "quiero ver fotos",
+            )
+            solicita_imagen = any(palabra in texto_lower for palabra in palabras_imagen)
+
+            if solicita_imagen:
+                logger.info(f"Detectada solicitud de imagen de {msg.telefono}: {msg.texto}")
+                logger.info(f"Intentando enviar imagen a {msg.telefono}")
+                enviada = await proveedor.enviar_imagen(
                     msg.telefono,
                     "https://res.cloudinary.com/dn8arwqww/image/upload/v1780266202/WhatsApp_Image_2026-05-31_at_1.10.56_PM_vnmb5j.jpg",
                     "Aquí tienes uno de nuestros clósets."
                 )
+                logger.info(f"Resultado de enviar_imagen a {msg.telefono}: {enviada}")
+
             # Generar respuesta con Claude
             respuesta = await generar_respuesta(msg.texto, historial)
 
