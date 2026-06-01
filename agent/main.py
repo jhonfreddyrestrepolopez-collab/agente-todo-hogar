@@ -86,17 +86,21 @@ async def webhook_handler(request: Request):
             texto_lower = msg.texto.lower()
 
             # Detectar si el cliente está pidiendo fotos/imágenes.
-            # Cubre singular/plural y variantes con y sin acento.
+            # Cubre singular/plural y variantes con y sin acento, además de
+            # frases como "muéstrame modelos", "ver catálogo", "fotos de closets".
             palabras_imagen = (
                 "foto", "fotos",
                 "imagen", "imagenes", "imágenes",
                 "enviame imagenes", "envíame imágenes",
                 "quiero ver fotos",
+                "muestrame modelos", "muéstrame modelos", "modelos",
+                "ver catalogo", "ver catálogo", "catalogo", "catálogo",
+                "closet", "closets", "clóset", "clósets",
             )
             solicita_imagen = any(palabra in texto_lower for palabra in palabras_imagen)
 
             if solicita_imagen:
-                logger.info(f"Detectada solicitud de imagen de {msg.telefono}: {msg.texto}")
+                logger.info(f"Solicitud de imagen detectada de {msg.telefono}: {msg.texto}")
                 logger.info(f"Intentando enviar imagen a {msg.telefono}")
                 enviada = await proveedor.enviar_imagen(
                     msg.telefono,
@@ -104,6 +108,23 @@ async def webhook_handler(request: Request):
                     "Aquí tienes uno de nuestros clósets."
                 )
                 logger.info(f"Resultado de enviar_imagen a {msg.telefono}: {enviada}")
+
+                # Si la imagen se envió bien, NO generamos respuesta de texto:
+                # el único mensaje que recibe el usuario es la imagen con su caption.
+                if enviada:
+                    logger.info(f"Imagen enviada correctamente a {msg.telefono}")
+                    # Guardamos el mensaje del usuario y registramos la imagen como
+                    # respuesta del agente para conservar el contexto de la conversación.
+                    await guardar_mensaje(msg.telefono, "user", msg.texto)
+                    await guardar_mensaje(msg.telefono, "assistant", "[imagen enviada: clóset]")
+                    logger.info(
+                        f"Se omite generación de respuesta porque ya se envió una imagen a {msg.telefono}"
+                    )
+                    continue
+                # Si falló el envío, seguimos al flujo normal para responder con texto.
+                logger.warning(
+                    f"El envío de imagen a {msg.telefono} falló; se continúa con respuesta de texto"
+                )
 
             # Generar respuesta con Claude
             respuesta = await generar_respuesta(msg.texto, historial)
