@@ -82,62 +82,26 @@ class ProveedorWhapi(ProveedorWhatsApp):
                 logger.error(f"Error Whapi: {r.status_code} — {r.text}")
             return r.status_code in (200, 201)
 
+    async def enviar_imagen(self, telefono: str, image_url: str, caption: str = "") -> bool:
+        """Envía una imagen por Whapi.Cloud."""
+        if not self.token:
+            logger.warning("WHAPI_TOKEN no configurado en .env")
+            return False
 
+        url = f"{self.base_url}/messages/image"
+        headers = {
+            "Authorization": f"Bearer {self.token}",
+            "Content-Type": "application/json",
+            "accept": "application/json",
+        }
+        payload = {
+            "to": telefono,
+            "media": image_url,
+            "caption": caption,
+        }
 
-
-            async def enviar_imagen(self, telefono: str, image_url: str, caption: str = "") -> bool:
-            """Envía una imagen por Whapi.Cloud"""
-
-    if not self.token:
-        logger.warning("WHAPI_TOKEN no configurado")
-        return False
-
-    url = f"{self.base_url}/messages/image"
-
-    headers = {
-        "Authorization": f"Bearer {self.token}",
-        "Content-Type": "application/json",
-        "accept": "application/json",
-    }
-
-    payload = {
-        "to": telefono,
-        "media": image_url,
-        "caption": caption
-    }
-
-    async with httpx.AsyncClient() as client:
-        r = await client.post(url, json=payload, headers=headers)
-
-        if r.status_code not in (200, 201):
-            logger.error(f"Error Whapi imagen: {r.status_code} — {r.text}")
-
-        return r.status_code in (200, 201)
-async def enviar_imagen(self, telefono: str, image_url: str, caption: str = "") -> bool:
-    """Envía una imagen por Whapi.Cloud"""
-
-    if not self.token:
-        logger.warning("WHAPI_TOKEN no configurado")
-        return False
-
-    url = f"{self.base_url}/messages/image"
-
-    headers = {
-        "Authorization": f"Bearer {self.token}",
-        "Content-Type": "application/json",
-        "accept": "application/json",
-    }
-
-    payload = {
-        "to": telefono,
-        "media": image_url,
-        "caption": caption
-    }
-
-    async with httpx.AsyncClient() as client:
-        r = await client.post(url, json=payload, headers=headers)
-
-        if r.status_code not in (200, 201):
-            logger.error(f"Error Whapi imagen: {r.status_code} — {r.text}")
-
-        return r.status_code in (200, 201)
+        async with httpx.AsyncClient() as client:
+            r = await client.post(url, json=payload, headers=headers)
+            if r.status_code not in (200, 201):
+                logger.error(f"Error Whapi imagen: {r.status_code} — {r.text}")
+            return r.status_code in (200, 201)
