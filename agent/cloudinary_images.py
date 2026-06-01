@@ -121,9 +121,16 @@ async def obtener_imagenes(categoria: str, max_resultados: int = 10) -> list[str
     Retorna una lista vacía si no hay credenciales, si la carpeta está vacía
     o si ocurre un error con la API.
     """
-    cloud_name = os.getenv("CLOUDINARY_CLOUD_NAME")
-    api_key = os.getenv("CLOUDINARY_API_KEY")
-    api_secret = os.getenv("CLOUDINARY_API_SECRET")
+    # Leemos las credenciales y limpiamos espacios/saltos de línea accidentales.
+    cloud_name = (os.getenv("CLOUDINARY_CLOUD_NAME") or "").strip()
+    api_key = (os.getenv("CLOUDINARY_API_KEY") or "").strip()
+    api_secret = (os.getenv("CLOUDINARY_API_SECRET") or "").strip()
+
+    # Logs de diagnóstico (temporales): muestran si cada variable llegó al proceso,
+    # SIN exponer su valor real por seguridad.
+    logger.info(f"Cloudinary cloud_name definido: {bool(cloud_name)}")
+    logger.info(f"Cloudinary api_key definida: {bool(api_key)}")
+    logger.info(f"Cloudinary api_secret definida: {bool(api_secret)}")
 
     if not all([cloud_name, api_key, api_secret]):
         logger.warning(
