@@ -100,10 +100,23 @@ def detectar_categoria(texto: str) -> str | None:
     return None
 
 
+def _urls_de_resultado(data: dict) -> list[str]:
+    """Extrae las secure_url de la respuesta de la Admin API de Cloudinary."""
+    return [
+        recurso["secure_url"]
+        for recurso in data.get("resources", [])
+        if recurso.get("secure_url")
+    ]
+
+
 async def obtener_imagenes(categoria: str, max_resultados: int = 10) -> list[str]:
     """
-    Consulta Cloudinary y devuelve las URLs (secure_url) de todas las imágenes
-    que estén en la carpeta `categoria`.
+    Consulta Cloudinary y devuelve las URLs (secure_url) de las imágenes que estén
+    en la carpeta `categoria`.
+
+    Funciona con los dos modelos de carpetas de Cloudinary:
+      1. Carpetas dinámicas (asset_folder) — modo por defecto desde 2024.
+      2. Carpetas clásicas (prefijo en el public_id, ej "categoria/archivo").
 
     Retorna una lista vacía si no hay credenciales, si la carpeta está vacía
     o si ocurre un error con la API.
@@ -119,28 +132,43 @@ async def obtener_imagenes(categoria: str, max_resultados: int = 10) -> list[str
         )
         return []
 
-    # Admin API: lista recursos de imagen cuyo public_id empieza por "categoria/"
-    url = f"https://api.cloudinary.com/v1_1/{cloud_name}/resources/image"
-    params = {
-        "type": "upload",
-        "prefix": f"{categoria}/",
-        "max_results": max_resultados,
-    }
+    base = f"https://api.cloudinary.com/v1_1/{cloud_name}"
+    auth = (api_key, api_secret)
 
     try:
-        async with httpx.AsyncClient() as client:
-            r = await client.get(url, params=params, auth=(api_key, api_secret))
-            if r.status_code != 200:
-                logger.error(f"Error Cloudinary: {r.status_code} — {r.text}")
-                return []
-            data = r.json()
-            urls = [
-                recurso["secure_url"]
-                for recurso in data.get("resources", [])
-                if recurso.get("secure_url")
-            ]
-            logger.info(f"Cloudinary: {len(urls)} imágenes en la carpeta '{categoria}'")
-            return urls
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            # Estrategia 1: carpetas dinámicas (asset_folder).
+            r = await client.get(
+                f"{base}/resources/by_asset_folder",
+                params={"asset_folder": categoria, "max_results": max_resultados},
+                auth=auth,
+            )
+            if r.status_code == 200:
+                urls = _urls_de_resultado(r.json())
+                if urls:
+                    logger.info(
+                        f"Cloudinary (asset_folder): {len(urls)} imágenes en '{categoria}'"
+                    )
+                    return urls
+            else:
+                logger.warning(
+                    f"Cloudinary by_asset_folder '{categoria}': "
+                    f"{r.status_code} — {r.text[:200]}"
+                )
+
+            # Estrategia 2: carpetas clásicas (prefijo del public_id).
+            r = await client.get(
+                f"{base}/resources/image",
+                params={"type": "upload", "prefix": f"{categoria}/", "max_results": max_resultados},
+                auth=auth,
+            )
+            if r.status_code == 200:
+                urls = _urls_de_resultado(r.json())
+                logger.info(f"Cloudinary (prefix): {len(urls)} imágenes en '{categoria}'")
+                return urls
+
+            logger.error(f"Error Cloudinary '{categoria}': {r.status_code} — {r.text[:200]}")
+            return []
     except Exception as e:
         logger.error(f"Error consultando Cloudinary para '{categoria}': {e}")
         return []
