@@ -28,6 +28,12 @@ from agent.cloudinary_images import (
 
 load_dotenv()
 
+# --- DIAGNÓSTICO TEMPORAL: variables de entorno con "CLOUD" ---
+# (Quitar una vez resuelto el tema de las credenciales de Cloudinary.)
+print("TODAS LAS VARIABLES CLOUD:", flush=True)
+print(sorted([k for k in os.environ.keys() if "CLOUD" in k]), flush=True)
+# --- FIN DIAGNÓSTICO TEMPORAL ---
+
 # Configuración de logging según entorno
 ENVIRONMENT = os.getenv("ENVIRONMENT", "development")
 log_level = logging.DEBUG if ENVIRONMENT == "development" else logging.INFO
