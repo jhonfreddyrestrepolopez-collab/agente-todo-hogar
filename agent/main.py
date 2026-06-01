@@ -7,6 +7,7 @@ Funciona con cualquier proveedor gracias a la capa de providers (aquí: Whapi.Cl
 """
 
 import os
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, HTTPException
@@ -20,17 +21,17 @@ from agent.memory import (
     obtener_historial,
     activar_modo_humano,
     modo_humano_activo,
+    registrar_imagen_enviada,
 )
 from agent.providers import obtener_proveedor
 from agent.cloudinary_images import (
     detectar_categoria,
-    obtener_imagenes,
     solicita_catalogo_completo,
     solicita_todos_closets,
     CATEGORIAS,
     CATEGORIAS_CLOSETS,
-    MAX_IMAGENES_POR_RESPUESTA,
 )
+from agent.catalogo import elegir_imagenes, caption_producto, sincronizar_todo
 
 load_dotenv()
 
@@ -66,6 +67,11 @@ async def lifespan(app: FastAPI):
     logger.info(f"Variables de entorno con 'CLOUD': {claves_cloud}")
     for nombre in ("CLOUDINARY_CLOUD_NAME", "CLOUDINARY_API_KEY", "CLOUDINARY_API_SECRET"):
         logger.info(f"  presente {nombre}: {nombre in os.environ}")
+
+    # Sincroniza el catálogo en segundo plano: analiza (una sola vez) las imágenes
+    # nuevas de Cloudinary y cachea nombre/alto/ancho/precio en la BD. No bloquea
+    # el arranque; las que falten se analizan también al pedirlas por primera vez.
+    asyncio.create_task(sincronizar_todo())
     yield
 
 
@@ -196,41 +202,49 @@ async def webhook_handler(request: Request):
                     await proveedor.enviar_mensaje(msg.telefono, mensaje_opciones)
                     continue
 
-                # Construir la lista final de imágenes (URL + caption) respetando el
-                # límite máximo por respuesta para no hacer spam.
-                seleccion = []  # lista de (url, caption)
-                for categoria in categorias_a_enviar:
-                    urls = await obtener_imagenes(categoria, max_resultados=MAX_IMAGENES_POR_RESPUESTA)
-                    logger.info(f"Imágenes encontradas en '{categoria}': {len(urls)}")
-                    caption = f"Modelos de {categoria.replace('_', ' ')}"
-                    # En modo muestra tomamos 1 por carpeta; si no, todas las de la carpeta.
-                    urls_categoria = urls[:1] if modo_muestra else urls
-                    for url_imagen in urls_categoria:
-                        seleccion.append((url_imagen, caption))
-
-                # Recortar al máximo permitido por respuesta.
-                seleccion = seleccion[:MAX_IMAGENES_POR_RESPUESTA]
-
-                # Enviar las imágenes seleccionadas.
-                logger.info(
-                    f"Intentando enviar {len(seleccion)} imágenes a {msg.telefono} "
-                    f"(máx {MAX_IMAGENES_POR_RESPUESTA}) de: {categorias_a_enviar}"
+                # Selección inteligente desde el catálogo (datos del análisis visual):
+                # solo lo que el cliente no ha recibido, filtrando por medida/precio
+                # cuando los menciona.
+                seleccion = await elegir_imagenes(
+                    texto=msg.texto,
+                    categorias=categorias_a_enviar,
+                    telefono=msg.telefono,
+                    modo_muestra=modo_muestra,
                 )
+                productos = seleccion["productos"]
+                logger.info(
+                    f"Selección para {msg.telefono}: {len(productos)} imágenes "
+                    f"(medidas={seleccion['medidas']}, presupuesto={seleccion['presupuesto']}, "
+                    f"sin_nuevas={seleccion['sin_nuevas']})"
+                )
+
+                # Si ya recibió todo lo disponible y no quedan nuevas, avisamos por texto.
+                if not productos and seleccion["sin_nuevas"]:
+                    aviso = (
+                        "Ya te compartí todos los modelos que tengo disponibles de eso 🙌. "
+                        "¿Quieres ver otra categoría, o te ayudo con medidas o presupuesto?"
+                    )
+                    await guardar_mensaje(msg.telefono, "user", msg.texto)
+                    await guardar_mensaje(msg.telefono, "assistant", aviso)
+                    await proveedor.enviar_mensaje(msg.telefono, aviso)
+                    continue
+
+                # Enviar las imágenes seleccionadas (cada una con su caption de catálogo).
                 enviadas = 0
-                for url_imagen, caption in seleccion:
-                    if await proveedor.enviar_imagen(msg.telefono, url_imagen, caption):
+                for p in productos:
+                    caption = caption_producto(p)
+                    if await proveedor.enviar_imagen(msg.telefono, p["image_url"], caption):
                         enviadas += 1
-                logger.info(f"Imágenes enviadas a {msg.telefono}: {enviadas}/{len(seleccion)}")
+                        await registrar_imagen_enviada(msg.telefono, p["public_id"])
+                logger.info(f"Imágenes enviadas a {msg.telefono}: {enviadas}/{len(productos)}")
 
                 # Si se envió al menos una imagen, NO generamos respuesta de texto:
                 # los únicos mensajes que recibe el usuario son las imágenes con su caption.
                 if enviadas > 0:
-                    logger.info(f"Imágenes enviadas correctamente a {msg.telefono}")
+                    nombres = ", ".join(p.get("nombre") or p["categoria"] for p in productos)
                     await guardar_mensaje(msg.telefono, "user", msg.texto)
                     await guardar_mensaje(
-                        msg.telefono,
-                        "assistant",
-                        f"[{enviadas} imágenes enviadas: {', '.join(categorias_a_enviar)}]",
+                        msg.telefono, "assistant", f"[{enviadas} imágenes enviadas: {nombres}]"
                     )
                     logger.info(
                         f"Se omite generación de respuesta porque ya se enviaron imágenes a {msg.telefono}"

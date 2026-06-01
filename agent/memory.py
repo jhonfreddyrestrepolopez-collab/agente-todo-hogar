@@ -10,7 +10,7 @@ import os
 from datetime import datetime, timedelta
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy import String, Text, DateTime, select, delete, Integer
+from sqlalchemy import String, Text, DateTime, select, delete, Integer, Float, UniqueConstraint
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -67,6 +67,36 @@ class MensajeBot(Base):
     __tablename__ = "mensajes_bot"
 
     mensaje_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class ProductoCatalogo(Base):
+    """
+    Catálogo de productos derivado del análisis visual de cada imagen de
+    Cloudinary. Se llena UNA sola vez por imagen (clave public_id) y se reutiliza
+    desde la BD; al agregar una imagen nueva, solo esa se analiza.
+    Medidas en centímetros; precio en la moneda local (entero).
+    """
+    __tablename__ = "catalogo"
+
+    public_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    categoria: Mapped[str] = mapped_column(String(80), index=True)
+    image_url: Mapped[str] = mapped_column(Text)
+    nombre: Mapped[str] = mapped_column(String(200), nullable=True)
+    alto_cm: Mapped[float] = mapped_column(Float, nullable=True)
+    ancho_cm: Mapped[float] = mapped_column(Float, nullable=True)
+    precio: Mapped[int] = mapped_column(Integer, nullable=True)
+    analizado_en: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
+class ImagenEnviada(Base):
+    """Registro de qué imágenes (public_id) ya recibió cada cliente (telefono)."""
+    __tablename__ = "imagenes_enviadas"
+    __table_args__ = (UniqueConstraint("telefono", "public_id", name="uq_tel_imagen"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    telefono: Mapped[str] = mapped_column(String(50), index=True)
+    public_id: Mapped[str] = mapped_column(String(255))
     timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
@@ -139,6 +169,84 @@ async def fue_mensaje_de_bot(mensaje_id: str) -> bool:
         return False
     async with async_session() as session:
         return await session.get(MensajeBot, mensaje_id) is not None
+
+
+# ── Catálogo de productos (análisis visual cacheado) ──────────────────────────
+
+def _producto_a_dict(p: "ProductoCatalogo") -> dict:
+    """Convierte una fila de catálogo en un diccionario simple."""
+    return {
+        "public_id": p.public_id,
+        "categoria": p.categoria,
+        "image_url": p.image_url,
+        "nombre": p.nombre,
+        "alto_cm": p.alto_cm,
+        "ancho_cm": p.ancho_cm,
+        "precio": p.precio,
+    }
+
+
+async def public_ids_en_catalogo(categoria: str) -> set[str]:
+    """Devuelve los public_id ya analizados (en el catálogo) de una categoría."""
+    async with async_session() as session:
+        result = await session.execute(
+            select(ProductoCatalogo.public_id).where(ProductoCatalogo.categoria == categoria)
+        )
+        return set(result.scalars().all())
+
+
+async def guardar_producto(public_id: str, categoria: str, image_url: str,
+                           nombre: str | None, alto_cm: float | None,
+                           ancho_cm: float | None, precio: int | None):
+    """Inserta o actualiza un producto del catálogo (clave public_id)."""
+    async with async_session() as session:
+        prod = await session.get(ProductoCatalogo, public_id)
+        if prod is None:
+            prod = ProductoCatalogo(public_id=public_id, categoria=categoria)
+            session.add(prod)
+        prod.categoria = categoria
+        prod.image_url = image_url
+        prod.nombre = nombre
+        prod.alto_cm = alto_cm
+        prod.ancho_cm = ancho_cm
+        prod.precio = precio
+        prod.analizado_en = datetime.utcnow()
+        await session.commit()
+
+
+async def obtener_productos(categoria: str | None = None) -> list[dict]:
+    """Devuelve los productos del catálogo (de una categoría o de todas)."""
+    async with async_session() as session:
+        query = select(ProductoCatalogo)
+        if categoria is not None:
+            query = query.where(ProductoCatalogo.categoria == categoria)
+        result = await session.execute(query)
+        return [_producto_a_dict(p) for p in result.scalars().all()]
+
+
+async def public_ids_enviados(telefono: str) -> set[str]:
+    """public_id de las imágenes que este cliente YA recibió."""
+    async with async_session() as session:
+        result = await session.execute(
+            select(ImagenEnviada.public_id).where(ImagenEnviada.telefono == telefono)
+        )
+        return set(result.scalars().all())
+
+
+async def registrar_imagen_enviada(telefono: str, public_id: str):
+    """Marca que el cliente recibió la imagen public_id (idempotente)."""
+    if not public_id:
+        return
+    async with async_session() as session:
+        ya = await session.execute(
+            select(ImagenEnviada).where(
+                ImagenEnviada.telefono == telefono,
+                ImagenEnviada.public_id == public_id,
+            )
+        )
+        if ya.scalars().first() is None:
+            session.add(ImagenEnviada(telefono=telefono, public_id=public_id))
+            await session.commit()
 
 
 async def guardar_mensaje(telefono: str, role: str, content: str):

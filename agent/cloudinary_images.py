@@ -100,18 +100,19 @@ def detectar_categoria(texto: str) -> str | None:
     return None
 
 
-def _urls_de_resultado(data: dict) -> list[str]:
-    """Extrae las secure_url de la respuesta de la Admin API de Cloudinary."""
-    return [
-        recurso["secure_url"]
-        for recurso in data.get("resources", [])
-        if recurso.get("secure_url")
-    ]
+def _items_de_resultado(data: dict) -> list[dict]:
+    """Extrae [{public_id, url}] de la respuesta de la Admin API de Cloudinary."""
+    items = []
+    for recurso in data.get("resources", []):
+        url = recurso.get("secure_url")
+        if url:
+            items.append({"public_id": recurso.get("public_id", url), "url": url})
+    return items
 
 
-async def obtener_imagenes(categoria: str, max_resultados: int = 10) -> list[str]:
+async def listar_imagenes(categoria: str, max_resultados: int = 50) -> list[dict]:
     """
-    Consulta Cloudinary y devuelve las URLs (secure_url) de las imágenes que estén
+    Consulta Cloudinary y devuelve [{public_id, url}] de las imágenes que estén
     en la carpeta `categoria`.
 
     Funciona con los dos modelos de carpetas de Cloudinary:
@@ -151,12 +152,12 @@ async def obtener_imagenes(categoria: str, max_resultados: int = 10) -> list[str
                 auth=auth,
             )
             if r.status_code == 200:
-                urls = _urls_de_resultado(r.json())
-                if urls:
+                items = _items_de_resultado(r.json())
+                if items:
                     logger.info(
-                        f"Cloudinary (asset_folder): {len(urls)} imágenes en '{categoria}'"
+                        f"Cloudinary (asset_folder): {len(items)} imágenes en '{categoria}'"
                     )
-                    return urls
+                    return items
             else:
                 logger.warning(
                     f"Cloudinary by_asset_folder '{categoria}': "
@@ -170,12 +171,17 @@ async def obtener_imagenes(categoria: str, max_resultados: int = 10) -> list[str
                 auth=auth,
             )
             if r.status_code == 200:
-                urls = _urls_de_resultado(r.json())
-                logger.info(f"Cloudinary (prefix): {len(urls)} imágenes en '{categoria}'")
-                return urls
+                items = _items_de_resultado(r.json())
+                logger.info(f"Cloudinary (prefix): {len(items)} imágenes en '{categoria}'")
+                return items
 
             logger.error(f"Error Cloudinary '{categoria}': {r.status_code} — {r.text[:200]}")
             return []
     except Exception as e:
         logger.error(f"Error consultando Cloudinary para '{categoria}': {e}")
         return []
+
+
+async def obtener_imagenes(categoria: str, max_resultados: int = 50) -> list[str]:
+    """Compatibilidad: devuelve solo las URLs de la carpeta."""
+    return [it["url"] for it in await listar_imagenes(categoria, max_resultados)]
