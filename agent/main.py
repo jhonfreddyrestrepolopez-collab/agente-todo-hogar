@@ -22,12 +22,15 @@ from agent.memory import (
     activar_modo_humano,
     modo_humano_activo,
     registrar_imagen_enviada,
+    obtener_productos,
 )
 from agent.providers import obtener_proveedor
 from agent.cloudinary_images import (
     detectar_categoria,
     solicita_catalogo_completo,
     solicita_todos_closets,
+    listar_carpetas,
+    listar_imagenes,
     CATEGORIAS,
     CATEGORIAS_CLOSETS,
 )
@@ -91,6 +94,63 @@ app = FastAPI(
 async def health_check():
     """Endpoint de salud para Railway/monitoreo."""
     return {"status": "ok", "service": "agentkit"}
+
+
+@app.get("/diagnostico/catalogo")
+async def diagnostico_catalogo(sincronizar: bool = False):
+    """
+    Resumen del estado real del catálogo en producción (diagnóstico temporal).
+    Con ?sincronizar=true fuerza el análisis de imágenes pendientes antes del resumen.
+    """
+    if sincronizar:
+        await sincronizar_todo()
+
+    carpetas = await listar_carpetas()
+    productos = await obtener_productos(None)
+
+    # Conteos por carpeta: imágenes en Cloudinary vs productos analizados en BD.
+    por_categoria = {}
+    for cat in carpetas:
+        imgs = await listar_imagenes(cat)
+        prods_cat = [p for p in productos if p["categoria"] == cat]
+        por_categoria[cat] = {
+            "imagenes_en_cloudinary": len(imgs),
+            "productos_analizados": len(prods_cat),
+            "pendientes": max(0, len(imgs) - len(prods_cat)),
+        }
+
+    def _tiene_medida(p):
+        return p["alto_cm"] is not None and p["ancho_cm"] is not None
+
+    def _fallido(p):
+        return (p["nombre"] is None and p["alto_cm"] is None
+                and p["ancho_cm"] is None and p["precio"] is None)
+
+    total_imgs = sum(c["imagenes_en_cloudinary"] for c in por_categoria.values())
+
+    return {
+        "1_carpetas_detectadas": len(carpetas),
+        "2_nombres_carpetas": carpetas,
+        "3_imagenes_por_carpeta": {k: v["imagenes_en_cloudinary"] for k, v in por_categoria.items()},
+        "4_productos_analizados": len(productos),
+        "5_con_alto_y_ancho": sum(1 for p in productos if _tiene_medida(p)),
+        "5b_con_alguna_medida": sum(1 for p in productos if p["alto_cm"] is not None or p["ancho_cm"] is not None),
+        "6_con_precio": sum(1 for p in productos if p["precio"] is not None),
+        "7_sin_analizar_pendientes": sum(c["pendientes"] for c in por_categoria.values()),
+        "7b_analisis_fallido": sum(1 for p in productos if _fallido(p)),
+        "total_imagenes_en_cloudinary": total_imgs,
+        "detalle_por_categoria": por_categoria,
+        "productos": [
+            {
+                "categoria": p["categoria"],
+                "nombre": p["nombre"],
+                "alto_cm": p["alto_cm"],
+                "ancho_cm": p["ancho_cm"],
+                "precio": p["precio"],
+            }
+            for p in productos
+        ],
+    }
 
 
 @app.get("/webhook")
