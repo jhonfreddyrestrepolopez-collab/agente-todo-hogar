@@ -23,6 +23,7 @@ from agent.memory import (
     modo_humano_activo,
     registrar_imagen_enviada,
     obtener_productos,
+    obtener_estado_sync,
 )
 from agent.providers import obtener_proveedor
 from agent.cloudinary_images import (
@@ -58,6 +59,8 @@ logger = logging.getLogger("agentkit")
 # Proveedor de WhatsApp (se configura en .env con WHATSAPP_PROVIDER)
 proveedor = obtener_proveedor()
 PORT = int(os.getenv("PORT", 8000))
+# Token de administrador para el comando manual de sincronización del catálogo.
+ADMIN_TOKEN = (os.getenv("ADMIN_TOKEN") or "").strip()
 
 
 @asynccontextmanager
@@ -96,15 +99,31 @@ async def health_check():
     return {"status": "ok", "service": "agentkit"}
 
 
-@app.get("/diagnostico/catalogo")
-async def diagnostico_catalogo(sincronizar: bool = False):
-    """
-    Resumen del estado real del catálogo en producción (diagnóstico temporal).
-    Con ?sincronizar=true fuerza el análisis de imágenes pendientes antes del resumen.
-    """
-    if sincronizar:
-        await sincronizar_todo()
+def _verificar_admin(request: Request):
+    """Valida el token de administrador (query ?token= o header X-Admin-Token)."""
+    if not ADMIN_TOKEN:
+        raise HTTPException(status_code=503, detail="ADMIN_TOKEN no configurado en el servidor")
+    token = request.query_params.get("token") or request.headers.get("x-admin-token")
+    if token != ADMIN_TOKEN:
+        raise HTTPException(status_code=401, detail="Token de administrador inválido")
 
+
+@app.post("/admin/sync_catalogo")
+async def admin_sync_catalogo(request: Request):
+    """
+    Comando MANUAL de administrador: sincroniza el catálogo con Cloudinary
+    (nuevas, modificadas y eliminadas) y devuelve el resumen de cambios.
+    Requiere token de administrador.
+    """
+    _verificar_admin(request)
+    logger.info("sync_catalogo solicitado por administrador")
+    resumen = await sincronizar_todo()
+    return {"status": "ok", "sincronizacion": resumen}
+
+
+@app.get("/diagnostico/catalogo")
+async def diagnostico_catalogo():
+    """Resumen del estado real del catálogo en producción (solo lectura)."""
     carpetas = await listar_carpetas()
     productos = await obtener_productos(None)
 
@@ -129,6 +148,7 @@ async def diagnostico_catalogo(sincronizar: bool = False):
     total_imgs = sum(c["imagenes_en_cloudinary"] for c in por_categoria.values())
 
     return {
+        "ultima_sincronizacion": await obtener_estado_sync(),
         "1_carpetas_detectadas": len(carpetas),
         "2_nombres_carpetas": carpetas,
         "3_imagenes_por_carpeta": {k: v["imagenes_en_cloudinary"] for k, v in por_categoria.items()},

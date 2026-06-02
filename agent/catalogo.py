@@ -27,6 +27,7 @@ from agent.brain import client
 from agent.cloudinary_images import (
     listar_imagenes,
     listar_carpetas,
+    es_carpeta_excluida,
     CARPETAS_EXCLUIDAS,
     CATEGORIAS,
     CATEGORIAS_CLOSETS,
@@ -37,6 +38,8 @@ from agent.memory import (
     obtener_productos,
     public_ids_enviados,
     eliminar_catalogo_por_prefijos,
+    eliminar_producto,
+    guardar_estado_sync,
 )
 
 logger = logging.getLogger("agentkit")
@@ -163,19 +166,20 @@ async def sincronizar_categoria(categoria: str) -> int:
     return len(nuevas)
 
 
-async def sincronizar_todo() -> int:
+async def sincronizar_todo() -> dict:
     """
-    Sincroniza TODAS las carpetas de Cloudinary (descubiertas dinámicamente).
-    Uso típico: tarea de fondo al arrancar. Si no se pueden listar las carpetas,
-    cae a la lista conocida CATEGORIAS como respaldo.
-    """
-    # Limpieza: quitar del catálogo productos demo (samples) que se hubieran
-    # catalogado antes de aplicar la exclusión.
-    purgados = await eliminar_catalogo_por_prefijos(list(CARPETAS_EXCLUIDAS))
-    if purgados:
-        logger.info(f"Catálogo: {purgados} productos demo (samples) eliminados")
+    Sincronización COMPLETA y manual del catálogo con Cloudinary. Detecta:
+      - imágenes NUEVAS  -> las analiza y agrega,
+      - imágenes MODIFICADAS (cambió su URL versionada) -> las re-analiza,
+      - imágenes ELIMINADAS (ya no están en Cloudinary) -> las borra del catálogo.
+    Solo re-analiza con visión lo nuevo/cambiado (no todo el catálogo).
 
-    # Reparar nombres con doble codificación (tildes/ñ) en filas ya existentes.
+    Devuelve un resumen con cuántos productos se agregaron, actualizaron y eliminaron.
+    """
+    # 1) Limpiar productos demo (samples) que se hubieran catalogado antes.
+    purgados = await eliminar_catalogo_por_prefijos(list(CARPETAS_EXCLUIDAS))
+
+    # 2) Reparar nombres con doble codificación (tildes/ñ) en filas existentes.
     reparados = 0
     for p in await obtener_productos(None):
         nuevo = reparar_mojibake(p["nombre"])
@@ -183,25 +187,76 @@ async def sincronizar_todo() -> int:
             await guardar_producto(p["public_id"], p["categoria"], p["image_url"],
                                    nuevo, p["alto_cm"], p["ancho_cm"], p["precio"])
             reparados += 1
-    if reparados:
-        logger.info(f"Catálogo: {reparados} nombres corregidos (codificación)")
 
+    # 3) Descubrir carpetas. Si falla el descubrimiento, NO borramos nada (evita
+    #    vaciar el catálogo por un error temporal de Cloudinary).
     carpetas = await listar_carpetas()
+    descubrio = bool(carpetas)
     if not carpetas:
-        logger.warning("No se descubrieron carpetas en Cloudinary; uso CATEGORIAS conocidas")
+        logger.warning("No se descubrieron carpetas en Cloudinary; uso CATEGORIAS y NO borro")
         carpetas = list(CATEGORIAS)
 
-    total = 0
+    agregados = actualizados = sin_cambios = 0
+    ids_en_cloudinary = set()
+    por_categoria = {}
+
     for categoria in carpetas:
         try:
-            total += await sincronizar_categoria(categoria)
+            items = await listar_imagenes(categoria)
         except Exception as e:
-            logger.error(f"Error sincronizando '{categoria}': {e}")
-    logger.info(
-        f"Sincronización de catálogo completa: {total} imágenes nuevas/cambiadas "
-        f"en {len(carpetas)} carpetas"
-    )
-    return total
+            logger.error(f"Error listando '{categoria}': {e}")
+            continue
+        existentes = {p["public_id"]: p for p in await obtener_productos(categoria)}
+        ag = ac = 0
+        for it in items:
+            ids_en_cloudinary.add(it["public_id"])
+            ex = existentes.get(it["public_id"])
+            if ex is None or ex["image_url"] != it["url"]:
+                datos = await analizar_imagen(it["url"])
+                await guardar_producto(
+                    public_id=it["public_id"], categoria=categoria, image_url=it["url"],
+                    nombre=datos["nombre"], alto_cm=datos["alto_cm"],
+                    ancho_cm=datos["ancho_cm"], precio=datos["precio"],
+                )
+                if ex is None:
+                    ag += 1
+                    logger.info(f"  + nuevo [{categoria}] {it['public_id']}: {datos}")
+                else:
+                    ac += 1
+                    logger.info(f"  ~ actualizado [{categoria}] {it['public_id']}: {datos}")
+            else:
+                sin_cambios += 1
+        agregados += ag
+        actualizados += ac
+        por_categoria[categoria] = {"imagenes": len(items), "agregados": ag, "actualizados": ac}
+
+    # 4) Eliminados: productos del catálogo que ya no están en Cloudinary.
+    eliminados = 0
+    if descubrio:
+        for p in await obtener_productos(None):
+            if es_carpeta_excluida(p["categoria"]):
+                continue
+            if p["public_id"] not in ids_en_cloudinary:
+                if await eliminar_producto(p["public_id"]):
+                    eliminados += 1
+                    logger.info(f"  - eliminado [{p['categoria']}] {p['public_id']}")
+
+    total = len(await obtener_productos(None))
+    resumen = {
+        "agregados": agregados,
+        "actualizados": actualizados,
+        "eliminados": eliminados,
+        "sin_cambios": sin_cambios,
+        "demo_purgados": purgados,
+        "nombres_reparados": reparados,
+        "deteccion_de_borrados": descubrio,
+        "total_en_catalogo": total,
+        "carpetas": carpetas,
+        "por_categoria": por_categoria,
+    }
+    await guardar_estado_sync(json.dumps(resumen, ensure_ascii=False))
+    logger.info(f"sync_catalogo completado: {resumen}")
+    return resumen
 
 
 # ── Interpretación del mensaje del cliente ────────────────────────────────────
@@ -342,11 +397,11 @@ async def elegir_imagenes(texto: str, categorias: list[str] | None, telefono: st
         "sin_nuevas": bool,       # True si el cliente ya recibió todo lo disponible
       }
     """
-    # 1) Reunir productos del catálogo.
+    # 1) Reunir productos del catálogo (se lee de la BD; el catálogo se actualiza
+    #    SOLO con el comando manual sync_catalogo o al arrancar, no por cada mensaje).
     if categorias:
         productos = []
         for categoria in categorias:
-            await sincronizar_categoria(categoria)  # analiza solo lo nuevo/cambiado
             productos.extend(await obtener_productos(categoria))
         categorias_muestra = list(categorias)
     else:

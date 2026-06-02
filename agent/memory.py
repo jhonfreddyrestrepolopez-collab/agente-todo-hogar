@@ -100,6 +100,15 @@ class ImagenEnviada(Base):
     timestamp: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class SyncInfo(Base):
+    """Una sola fila (id=1) con la fecha y el resumen de la última sincronización."""
+    __tablename__ = "sync_info"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)  # siempre 1
+    fecha: Mapped[datetime] = mapped_column(DateTime)
+    resumen: Mapped[str] = mapped_column(Text, nullable=True)
+
+
 async def inicializar_db():
     """Crea las tablas si no existen."""
     import logging
@@ -222,6 +231,39 @@ async def obtener_productos(categoria: str | None = None) -> list[dict]:
             query = query.where(ProductoCatalogo.categoria == categoria)
         result = await session.execute(query)
         return [_producto_a_dict(p) for p in result.scalars().all()]
+
+
+async def eliminar_producto(public_id: str) -> bool:
+    """Borra un producto del catálogo por su public_id. True si existía."""
+    async with async_session() as session:
+        prod = await session.get(ProductoCatalogo, public_id)
+        if prod is None:
+            return False
+        await session.delete(prod)
+        await session.commit()
+        return True
+
+
+async def guardar_estado_sync(resumen: str):
+    """Guarda (fila única id=1) la fecha actual y el resumen JSON de la sincronización."""
+    async with async_session() as session:
+        row = await session.get(SyncInfo, 1)
+        if row is None:
+            row = SyncInfo(id=1, fecha=datetime.utcnow(), resumen=resumen)
+            session.add(row)
+        else:
+            row.fecha = datetime.utcnow()
+            row.resumen = resumen
+        await session.commit()
+
+
+async def obtener_estado_sync() -> dict | None:
+    """Devuelve {'fecha', 'resumen'} de la última sincronización, o None si no hubo."""
+    async with async_session() as session:
+        row = await session.get(SyncInfo, 1)
+        if row is None:
+            return None
+        return {"fecha_utc": row.fecha.isoformat(), "resumen": row.resumen}
 
 
 async def eliminar_catalogo_por_prefijos(prefijos: list[str]) -> int:
