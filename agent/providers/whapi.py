@@ -16,6 +16,7 @@ Documentación API: https://support.whapi.cloud / https://gate.whapi.cloud
 """
 
 import os
+import time
 import logging
 import httpx
 from collections import deque
@@ -24,6 +25,15 @@ from agent.providers.base import ProveedorWhatsApp, MensajeEntrante
 from agent.memory import registrar_mensaje_bot, fue_mensaje_de_bot
 
 logger = logging.getLogger("agentkit")
+
+# Valores de "source" que indican que un HUMANO escribió desde un dispositivo
+# (no la API, no un sistema automático). Whapi marca con estos los mensajes
+# tecleados a mano. El modo humano SOLO se activa con uno de estos.
+SOURCES_HUMANOS = {"mobile", "web", "desktop", "ios", "android", "phone"}
+
+# Segundos durante los cuales un mensaje que el bot acaba de enviar se reconoce
+# como "eco propio" por coincidencia de contenido (además del id y source=api).
+VENTANA_ECO_SEGUNDOS = 180
 
 
 class ProveedorWhapi(ProveedorWhatsApp):
@@ -41,6 +51,11 @@ class ProveedorWhapi(ProveedorWhatsApp):
         self._ids_bot = deque()        # orden de llegada (para acotar tamaño)
         self._ids_bot_set = set()      # búsqueda rápida por id
         self._MAX_IDS_BOT = 1000
+        # Contenido recién enviado por el bot: (telefono, texto, timestamp). Sirve
+        # para reconocer el eco del propio bot aunque el id no coincida.
+        self._envios_recientes = deque()
+        # Buffer de diagnóstico de los últimos mensajes from_me (sin texto).
+        self._ultimos_from_me = deque(maxlen=30)
 
     async def _registrar_envio_bot(self, mensaje_id: str) -> None:
         """Recuerda que el bot envió el mensaje con este id (caché + BD persistente)."""
@@ -55,6 +70,31 @@ class ProveedorWhapi(ProveedorWhatsApp):
                 self._ids_bot_set.discard(viejo)
         # Persistencia en BD (sobrevive reinicios).
         await registrar_mensaje_bot(mensaje_id)
+
+    def _registrar_envio_contenido(self, telefono: str, texto: str) -> None:
+        """Guarda (telefono, texto, ahora) de un mensaje que acaba de enviar el bot."""
+        self._envios_recientes.append((telefono, (texto or "").strip(), time.monotonic()))
+        # Acotar tamaño.
+        while len(self._envios_recientes) > 200:
+            self._envios_recientes.popleft()
+
+    def _es_eco_por_contenido(self, telefono: str, texto: str) -> bool:
+        """True si el bot envió hace poco un mensaje igual (mismo destino y texto)."""
+        ahora = time.monotonic()
+        objetivo = (texto or "").strip()
+        encontrado = False
+        vigentes = deque()
+        for tel, txt, ts in self._envios_recientes:
+            if ahora - ts <= VENTANA_ECO_SEGUNDOS:
+                vigentes.append((tel, txt, ts))  # conservar los recientes
+                if tel == telefono and txt == objetivo:
+                    encontrado = True
+        self._envios_recientes = vigentes
+        return encontrado
+
+    def ultimos_from_me(self) -> list[dict]:
+        """Metadatos (sin texto) de los últimos from_me, para diagnóstico."""
+        return list(self._ultimos_from_me)
 
     async def fue_enviado_por_bot(self, mensaje_id: str) -> bool:
         """True si el mensaje (por id) lo envió el propio bot, no un humano."""
@@ -91,27 +131,11 @@ class ProveedorWhapi(ProveedorWhatsApp):
 
             mensaje_id = msg.get("id", "")
             from_me = bool(msg.get("from_me", False))
-
-            # Si el mensaje es saliente (from_me), hay que distinguir DOS casos:
-            #   a) Lo envió el PROPIO bot -> es un eco, lo ignoramos por completo
-            #      (si no, el bot se silenciaría a sí mismo al responder).
-            #   b) Lo escribió el DUEÑO a mano desde el teléfono -> es_propio=True,
-            #      y debe activar el modo humano en ese chat.
-            # Detectamos el eco del bot por id conocido o por source == "api".
-            if from_me:
-                es_eco_bot = (
-                    await self.fue_enviado_por_bot(mensaje_id)
-                    or msg.get("source") == "api"
-                )
-                if es_eco_bot:
-                    continue
+            source = (msg.get("source") or "").lower()
 
             # Identificamos la conversación por el cliente (la otra parte del chat).
-            # Usamos chat_id porque es el mismo en ambos sentidos:
-            #   - Entrante: chat_id = cliente, from = cliente
-            #   - Saliente (from_me): chat_id = cliente, from = NUESTRO número
-            # Si usáramos "from" en los mensajes propios, guardaríamos el modo
-            # humano con nuestro número y nunca coincidiría con el del cliente.
+            # chat_id es el mismo en ambos sentidos; en mensajes propios "from" es
+            # NUESTRO número, por eso no lo usamos como clave.
             chat_id = msg.get("chat_id", "")
             telefono = chat_id.split("@")[0] if "@" in chat_id else chat_id
             if not telefono:
@@ -119,12 +143,45 @@ class ProveedorWhapi(ProveedorWhatsApp):
 
             texto = msg.get("text", {}).get("body", "")
 
-            mensajes.append(MensajeEntrante(
-                telefono=telefono,
-                texto=texto,
-                mensaje_id=mensaje_id,
-                es_propio=from_me,  # True solo si lo escribió un humano (ya filtramos ecos)
-            ))
+            # ── Mensajes ENTRANTES (del cliente): se procesan normal. ──
+            if not from_me:
+                mensajes.append(MensajeEntrante(
+                    telefono=telefono, texto=texto,
+                    mensaje_id=mensaje_id, es_propio=False,
+                ))
+                continue
+
+            # ── Mensajes SALIENTES (from_me): clasificar con EVIDENCIA POSITIVA. ──
+            # El modo humano SOLO se activa si hay prueba clara de que un humano
+            # escribió desde un dispositivo. Todo lo demás (eco del bot, API,
+            # saludos automáticos de WhatsApp Business, sistema) se IGNORA.
+            es_eco_bot = (
+                await self.fue_enviado_por_bot(mensaje_id)
+                or source == "api"
+                or self._es_eco_por_contenido(telefono, texto)
+            )
+            es_humano = (not es_eco_bot) and (source in SOURCES_HUMANOS)
+
+            # Registrar diagnóstico (sin texto).
+            self._ultimos_from_me.append({
+                "source": source or "(vacío)",
+                "id_conocido_del_bot": await self.fue_enviado_por_bot(mensaje_id),
+                "eco_por_contenido": self._es_eco_por_contenido(telefono, texto),
+                "clasificacion": "humano" if es_humano else ("eco_bot" if es_eco_bot else "ignorado"),
+            })
+
+            if es_humano:
+                logger.info(f"Mensaje MANUAL de humano detectado (source={source}) en chat {telefono}")
+                mensajes.append(MensajeEntrante(
+                    telefono=telefono, texto=texto,
+                    mensaje_id=mensaje_id, es_propio=True,
+                ))
+            else:
+                # Ni cliente ni humano operador: no activa modo humano ni se responde.
+                logger.info(
+                    f"from_me IGNORADO en chat {telefono} "
+                    f"(source={source or 'vacío'}, eco_bot={es_eco_bot}): no activa modo humano"
+                )
 
         return mensajes
 
@@ -150,7 +207,8 @@ class ProveedorWhapi(ProveedorWhatsApp):
             if r.status_code not in (200, 201):
                 logger.error(f"Error Whapi: {r.status_code} — {r.text}")
                 return False
-            # Registramos el id del mensaje enviado por el bot para ignorar su eco.
+            # Registramos el id Y el contenido del mensaje del bot para ignorar su eco.
+            self._registrar_envio_contenido(telefono, mensaje)
             try:
                 await self._registrar_envio_bot(self._extraer_id_respuesta(r.json()))
             except Exception:
@@ -180,7 +238,8 @@ class ProveedorWhapi(ProveedorWhatsApp):
             if r.status_code not in (200, 201):
                 logger.error(f"Error Whapi imagen: {r.status_code} — {r.text}")
                 return False
-            # Registramos el id de la imagen enviada por el bot para ignorar su eco.
+            # Registramos el id Y el caption de la imagen del bot para ignorar su eco.
+            self._registrar_envio_contenido(telefono, caption)
             try:
                 await self._registrar_envio_bot(self._extraer_id_respuesta(r.json()))
             except Exception:

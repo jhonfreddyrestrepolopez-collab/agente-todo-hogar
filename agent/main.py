@@ -122,6 +122,18 @@ async def admin_sync_catalogo(request: Request):
     return {"status": "ok", "sincronizacion": resumen}
 
 
+@app.get("/diagnostico/from_me")
+async def diagnostico_from_me(request: Request):
+    """
+    Metadatos (sin texto) de los últimos mensajes salientes (from_me) y cómo se
+    clasificaron: humano / eco_bot / ignorado. Útil para ver qué 'source' usa
+    Whapi. Requiere token de administrador.
+    """
+    _verificar_admin(request)
+    fn = getattr(proveedor, "ultimos_from_me", None)
+    return {"ultimos_from_me": fn() if callable(fn) else "no disponible para este proveedor"}
+
+
 @app.get("/diagnostico/catalogo")
 async def diagnostico_catalogo():
     """Resumen del estado real del catálogo en producción (solo lectura)."""
