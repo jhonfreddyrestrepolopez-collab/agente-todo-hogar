@@ -37,11 +37,23 @@ def _credenciales_cloudinary() -> tuple[str, str, str]:
     )
 
 
+# Carpetas a IGNORAR al descubrir el catálogo. Cloudinary crea por defecto la
+# carpeta "samples" con imágenes demo (gatos, comida, tenis...) que no son
+# productos del negocio. Se excluyen ella y sus subcarpetas.
+CARPETAS_EXCLUIDAS = ("samples",)
+
+
+def es_carpeta_excluida(ruta: str) -> bool:
+    """True si la ruta es una carpeta excluida (o subcarpeta de una)."""
+    return any(ruta == p or ruta.startswith(p + "/") for p in CARPETAS_EXCLUIDAS)
+
+
 async def listar_carpetas() -> list[str]:
     """
-    Descubre dinámicamente TODAS las carpetas de Cloudinary (raíz y subcarpetas),
+    Descubre dinámicamente las carpetas de Cloudinary (raíz y subcarpetas),
     para no depender de una lista fija de categorías. Devuelve sus rutas (que se
-    usan como nombre de categoría). Lista vacía si no hay credenciales o falla.
+    usan como nombre de categoría), EXCLUYENDO las carpetas demo (samples).
+    Lista vacía si no hay credenciales o falla.
     """
     cloud_name, api_key, api_secret = _credenciales_cloudinary()
     if not all([cloud_name, api_key, api_secret]):
@@ -64,7 +76,9 @@ async def listar_carpetas() -> list[str]:
             return
         for f in r.json().get("folders", []):
             ruta = f.get("path") or f.get("name")
-            if ruta and ruta not in carpetas and len(carpetas) < 200:
+            if not ruta or es_carpeta_excluida(ruta):
+                continue  # ignoramos carpetas demo (samples) y sus subcarpetas
+            if ruta not in carpetas and len(carpetas) < 200:
                 carpetas.append(ruta)
                 await recorrer(client, ruta)  # subcarpetas (estructura anidada)
 

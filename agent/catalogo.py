@@ -27,6 +27,7 @@ from agent.brain import client
 from agent.cloudinary_images import (
     listar_imagenes,
     listar_carpetas,
+    CARPETAS_EXCLUIDAS,
     CATEGORIAS,
     CATEGORIAS_CLOSETS,
     MAX_IMAGENES_POR_RESPUESTA,
@@ -35,6 +36,7 @@ from agent.memory import (
     guardar_producto,
     obtener_productos,
     public_ids_enviados,
+    eliminar_catalogo_por_prefijos,
 )
 
 logger = logging.getLogger("agentkit")
@@ -78,6 +80,20 @@ def _parsear_json(texto: str) -> dict:
         return {}
 
 
+def reparar_mojibake(s: str | None) -> str | None:
+    """
+    Corrige texto con doble codificación (UTF-8 leído como Latin-1), p. ej.
+    'Clóset' -> 'Clóset', 'Rebaño' -> 'Rebaño'. Solo actúa si detecta los
+    marcadores típicos y la reinterpretación produce UTF-8 válido.
+    """
+    if not s or not any(m in s for m in ("Ã", "Â", "â€")):
+        return s
+    try:
+        return s.encode("latin-1").decode("utf-8")
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return s
+
+
 def _a_numero(valor) -> float | None:
     """Convierte a número o None."""
     if valor is None:
@@ -107,7 +123,7 @@ async def analizar_imagen(image_url: str) -> dict:
         datos = _parsear_json(resp.content[0].text)
         precio = _a_numero(datos.get("precio"))
         return {
-            "nombre": (datos.get("nombre") or None),
+            "nombre": reparar_mojibake(datos.get("nombre") or None),
             "alto_cm": _a_numero(datos.get("alto_cm")),
             "ancho_cm": _a_numero(datos.get("ancho_cm")),
             "precio": int(precio) if precio is not None else None,
@@ -153,6 +169,23 @@ async def sincronizar_todo() -> int:
     Uso típico: tarea de fondo al arrancar. Si no se pueden listar las carpetas,
     cae a la lista conocida CATEGORIAS como respaldo.
     """
+    # Limpieza: quitar del catálogo productos demo (samples) que se hubieran
+    # catalogado antes de aplicar la exclusión.
+    purgados = await eliminar_catalogo_por_prefijos(list(CARPETAS_EXCLUIDAS))
+    if purgados:
+        logger.info(f"Catálogo: {purgados} productos demo (samples) eliminados")
+
+    # Reparar nombres con doble codificación (tildes/ñ) en filas ya existentes.
+    reparados = 0
+    for p in await obtener_productos(None):
+        nuevo = reparar_mojibake(p["nombre"])
+        if nuevo != p["nombre"]:
+            await guardar_producto(p["public_id"], p["categoria"], p["image_url"],
+                                   nuevo, p["alto_cm"], p["ancho_cm"], p["precio"])
+            reparados += 1
+    if reparados:
+        logger.info(f"Catálogo: {reparados} nombres corregidos (codificación)")
+
     carpetas = await listar_carpetas()
     if not carpetas:
         logger.warning("No se descubrieron carpetas en Cloudinary; uso CATEGORIAS conocidas")

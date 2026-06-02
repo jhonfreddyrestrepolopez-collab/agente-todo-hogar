@@ -10,7 +10,7 @@ import os
 from datetime import datetime, timedelta
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy import String, Text, DateTime, select, delete, Integer, Float, UniqueConstraint
+from sqlalchemy import String, Text, DateTime, select, delete, or_, Integer, Float, UniqueConstraint
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -222,6 +222,23 @@ async def obtener_productos(categoria: str | None = None) -> list[dict]:
             query = query.where(ProductoCatalogo.categoria == categoria)
         result = await session.execute(query)
         return [_producto_a_dict(p) for p in result.scalars().all()]
+
+
+async def eliminar_catalogo_por_prefijos(prefijos: list[str]) -> int:
+    """
+    Borra del catálogo los productos cuya categoría sea (o empiece por) alguno de
+    los prefijos dados. Sirve para limpiar carpetas demo (samples) ya catalogadas.
+    """
+    if not prefijos:
+        return 0
+    condiciones = []
+    for p in prefijos:
+        condiciones.append(ProductoCatalogo.categoria == p)
+        condiciones.append(ProductoCatalogo.categoria.like(f"{p}/%"))
+    async with async_session() as session:
+        res = await session.execute(delete(ProductoCatalogo).where(or_(*condiciones)))
+        await session.commit()
+        return res.rowcount or 0
 
 
 async def public_ids_enviados(telefono: str) -> set[str]:
