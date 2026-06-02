@@ -23,8 +23,59 @@ Documentación: https://cloudinary.com/documentation/admin_api#get_resources
 import os
 import logging
 import httpx
+from urllib.parse import quote
 
 logger = logging.getLogger("agentkit")
+
+
+def _credenciales_cloudinary() -> tuple[str, str, str]:
+    """Devuelve (cloud_name, api_key, api_secret) ya limpios, o cadenas vacías."""
+    return (
+        (os.getenv("CLOUDINARY_CLOUD_NAME") or "").strip(),
+        (os.getenv("CLOUDINARY_API_KEY") or "").strip(),
+        (os.getenv("CLOUDINARY_API_SECRET") or "").strip(),
+    )
+
+
+async def listar_carpetas() -> list[str]:
+    """
+    Descubre dinámicamente TODAS las carpetas de Cloudinary (raíz y subcarpetas),
+    para no depender de una lista fija de categorías. Devuelve sus rutas (que se
+    usan como nombre de categoría). Lista vacía si no hay credenciales o falla.
+    """
+    cloud_name, api_key, api_secret = _credenciales_cloudinary()
+    if not all([cloud_name, api_key, api_secret]):
+        logger.warning("Cloudinary: sin credenciales, no se pueden listar carpetas")
+        return []
+
+    base = f"https://api.cloudinary.com/v1_1/{cloud_name}"
+    auth = (api_key, api_secret)
+    carpetas: list[str] = []
+
+    async def recorrer(client: httpx.AsyncClient, path: str):
+        # /folders lista la raíz; /folders/{path} lista las subcarpetas de path.
+        endpoint = f"{base}/folders" if not path else f"{base}/folders/{quote(path)}"
+        r = await client.get(endpoint, auth=auth)
+        if r.status_code != 200:
+            if path:  # en la raíz un error sí importa; en subcarpetas lo ignoramos
+                logger.warning(f"Cloudinary folders '{path}': {r.status_code}")
+            else:
+                logger.error(f"Cloudinary /folders: {r.status_code} — {r.text[:200]}")
+            return
+        for f in r.json().get("folders", []):
+            ruta = f.get("path") or f.get("name")
+            if ruta and ruta not in carpetas and len(carpetas) < 200:
+                carpetas.append(ruta)
+                await recorrer(client, ruta)  # subcarpetas (estructura anidada)
+
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            await recorrer(client, "")
+    except Exception as e:
+        logger.error(f"Error listando carpetas de Cloudinary: {e}")
+
+    logger.info(f"Cloudinary: {len(carpetas)} carpetas descubiertas: {carpetas}")
+    return carpetas
 
 # Categorías disponibles = nombres EXACTOS de las carpetas en Cloudinary.
 # El orden importa para la detección (lo más específico primero).

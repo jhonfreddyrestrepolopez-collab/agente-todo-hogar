@@ -26,12 +26,12 @@ import logging
 from agent.brain import client
 from agent.cloudinary_images import (
     listar_imagenes,
+    listar_carpetas,
     CATEGORIAS,
     CATEGORIAS_CLOSETS,
     MAX_IMAGENES_POR_RESPUESTA,
 )
 from agent.memory import (
-    public_ids_en_catalogo,
     guardar_producto,
     obtener_productos,
     public_ids_enviados,
@@ -122,13 +122,16 @@ async def analizar_imagen(image_url: str) -> dict:
 async def sincronizar_categoria(categoria: str) -> int:
     """
     Asegura que todas las imágenes de la categoría estén analizadas en el catálogo.
-    Analiza SOLO las imágenes nuevas (no vistas antes). Devuelve cuántas analizó.
+    Analiza SOLO las imágenes nuevas o que CAMBIARON (la URL de Cloudinary incluye
+    la versión, así que si la imagen se reemplaza, su URL cambia y se re-analiza).
+    Devuelve cuántas analizó.
     """
     items = await listar_imagenes(categoria)
-    ya_analizadas = await public_ids_en_catalogo(categoria)
-    nuevas = [it for it in items if it["public_id"] not in ya_analizadas]
+    # Mapa de lo ya catalogado: public_id -> URL guardada.
+    existentes = {p["public_id"]: p["image_url"] for p in await obtener_productos(categoria)}
+    nuevas = [it for it in items if existentes.get(it["public_id"]) != it["url"]]
     if nuevas:
-        logger.info(f"Catálogo '{categoria}': analizando {len(nuevas)} imagen(es) nueva(s)")
+        logger.info(f"Catálogo '{categoria}': analizando {len(nuevas)} imagen(es) nueva(s)/cambiada(s)")
     for it in nuevas:
         datos = await analizar_imagen(it["url"])
         await guardar_producto(
@@ -140,19 +143,31 @@ async def sincronizar_categoria(categoria: str) -> int:
             ancho_cm=datos["ancho_cm"],
             precio=datos["precio"],
         )
-        logger.info(f"  + {it['public_id']}: {datos}")
+        logger.info(f"  + [{categoria}] {it['public_id']}: {datos}")
     return len(nuevas)
 
 
 async def sincronizar_todo() -> int:
-    """Sincroniza todas las categorías (uso típico: tarea de fondo al arrancar)."""
+    """
+    Sincroniza TODAS las carpetas de Cloudinary (descubiertas dinámicamente).
+    Uso típico: tarea de fondo al arrancar. Si no se pueden listar las carpetas,
+    cae a la lista conocida CATEGORIAS como respaldo.
+    """
+    carpetas = await listar_carpetas()
+    if not carpetas:
+        logger.warning("No se descubrieron carpetas en Cloudinary; uso CATEGORIAS conocidas")
+        carpetas = list(CATEGORIAS)
+
     total = 0
-    for categoria in CATEGORIAS:
+    for categoria in carpetas:
         try:
             total += await sincronizar_categoria(categoria)
         except Exception as e:
             logger.error(f"Error sincronizando '{categoria}': {e}")
-    logger.info(f"Sincronización de catálogo completa: {total} imágenes nuevas analizadas")
+    logger.info(
+        f"Sincronización de catálogo completa: {total} imágenes nuevas/cambiadas "
+        f"en {len(carpetas)} carpetas"
+    )
     return total
 
 
@@ -247,6 +262,16 @@ def extraer_presupuesto(texto: str) -> int | None:
     return max(candidatos) if candidatos else None
 
 
+def pidio_medida_o_precio(texto: str) -> bool:
+    """True si el cliente menciona una medida o un presupuesto (aunque no diga categoría)."""
+    medidas = extraer_medidas(texto)
+    return (
+        medidas["alto_cm"] is not None
+        or medidas["ancho_cm"] is not None
+        or extraer_presupuesto(texto) is not None
+    )
+
+
 # ── Selección de imágenes a enviar ────────────────────────────────────────────
 
 def _distancia(producto: dict, alto: float | None, ancho: float | None) -> float | None:
@@ -265,11 +290,18 @@ def _distancia(producto: dict, alto: float | None, ancho: float | None) -> float
     return sum(d * d for d in dims) ** 0.5
 
 
-async def elegir_imagenes(texto: str, categorias: list[str], telefono: str,
+async def elegir_imagenes(texto: str, categorias: list[str] | None, telefono: str,
                           modo_muestra: bool,
                           max_imgs: int = MAX_IMAGENES_POR_RESPUESTA) -> dict:
     """
-    Decide qué productos enviar. Devuelve:
+    Decide qué productos enviar.
+
+    `categorias`:
+      - lista de categorías -> busca en esas carpetas (las sincroniza primero);
+      - None -> busca en TODO el catálogo (útil cuando el cliente pide por medida
+        o precio sin mencionar categoría).
+
+    Devuelve:
       {
         "productos": [..],        # productos elegidos (con datos)
         "presupuesto": int|None,
@@ -277,11 +309,17 @@ async def elegir_imagenes(texto: str, categorias: list[str], telefono: str,
         "sin_nuevas": bool,       # True si el cliente ya recibió todo lo disponible
       }
     """
-    # 1) Asegurar que el catálogo de esas categorías esté analizado (solo lo nuevo).
-    productos = []
-    for categoria in categorias:
-        await sincronizar_categoria(categoria)
-        productos.extend(await obtener_productos(categoria))
+    # 1) Reunir productos del catálogo.
+    if categorias:
+        productos = []
+        for categoria in categorias:
+            await sincronizar_categoria(categoria)  # analiza solo lo nuevo/cambiado
+            productos.extend(await obtener_productos(categoria))
+        categorias_muestra = list(categorias)
+    else:
+        # Todo el catálogo (lo ya analizado en BD; el fondo lo mantiene al día).
+        productos = await obtener_productos(None)
+        categorias_muestra = sorted({p["categoria"] for p in productos})
 
     presupuesto = extraer_presupuesto(texto)
     medidas = extraer_medidas(texto)
@@ -313,7 +351,7 @@ async def elegir_imagenes(texto: str, categorias: list[str], telefono: str,
         elegidos = []
         usados = set()
         for fuente in (no_enviados, base):  # primero las no enviadas
-            for categoria in categorias:
+            for categoria in categorias_muestra:
                 if len(elegidos) >= max_imgs:
                     break
                 for p in fuente:

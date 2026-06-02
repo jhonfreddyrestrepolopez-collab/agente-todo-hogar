@@ -31,7 +31,12 @@ from agent.cloudinary_images import (
     CATEGORIAS,
     CATEGORIAS_CLOSETS,
 )
-from agent.catalogo import elegir_imagenes, caption_producto, sincronizar_todo
+from agent.catalogo import (
+    elegir_imagenes,
+    caption_producto,
+    sincronizar_todo,
+    pidio_medida_o_precio,
+)
 
 load_dotenv()
 
@@ -159,37 +164,49 @@ async def webhook_handler(request: Request):
                 "closet", "closets", "clóset", "clósets",
             )
             # Se considera solicitud de imagen si: usa palabras de "foto/catálogo",
-            # menciona una categoría concreta, o pide el catálogo completo.
+            # menciona una categoría concreta, pide el catálogo completo, o pide
+            # por medida/precio (aunque no nombre la categoría).
             solicita_imagen = (
                 any(palabra in texto_lower for palabra in palabras_imagen)
                 or detectar_categoria(msg.texto) is not None
                 or solicita_catalogo_completo(msg.texto)
+                or pidio_medida_o_precio(msg.texto)
             )
 
             if solicita_imagen:
                 logger.info(f"Solicitud de imagen detectada de {msg.telefono}: {msg.texto}")
 
-                # Decidir qué carpetas enviar y si es una "muestra" (1 por carpeta)
-                # o todas las imágenes de una sola categoría.
-                #   - Catálogo completo  -> muestra de TODAS las carpetas
-                #   - Todos los closets  -> muestra de las carpetas de clóset
-                #   - Categoría puntual  -> hasta 5 imágenes de esa carpeta
+                # Decidir en qué carpetas buscar:
+                #   - Catálogo completo  -> None (TODO el catálogo), como muestra
+                #   - Todos los closets  -> carpetas de clóset, como muestra
+                #   - Categoría puntual  -> esa carpeta
+                #   - Solo medida/precio -> None (TODO el catálogo), sin muestra
+                #   - Nada de lo anterior-> ofrecer opciones
+                # categorias_a_enviar == None significa "todo el catálogo".
+                modo_muestra = False
+                ofrecer_opciones = False
                 if solicita_catalogo_completo(msg.texto):
-                    categorias_a_enviar = list(CATEGORIAS)
+                    categorias_a_enviar = None
                     modo_muestra = True
-                    logger.info(f"Categoría detectada: catálogo completo {categorias_a_enviar}")
+                    logger.info("Categoría detectada: catálogo completo (todas las carpetas)")
                 elif solicita_todos_closets(msg.texto):
                     categorias_a_enviar = list(CATEGORIAS_CLOSETS)
                     modo_muestra = True
                     logger.info(f"Categoría detectada: todos los closets {categorias_a_enviar}")
                 else:
                     categoria = detectar_categoria(msg.texto)
-                    categorias_a_enviar = [categoria] if categoria else []
-                    modo_muestra = False
-                    logger.info(f"Categoría detectada: {categoria}")
+                    if categoria:
+                        categorias_a_enviar = [categoria]
+                        logger.info(f"Categoría detectada: {categoria}")
+                    elif pidio_medida_o_precio(msg.texto):
+                        categorias_a_enviar = None  # buscar en todo el catálogo
+                        logger.info("Sin categoría, pero pidió medida/precio: busco en todo el catálogo")
+                    else:
+                        categorias_a_enviar = []
+                        ofrecer_opciones = True
 
-                if not categorias_a_enviar:
-                    # Pidió fotos pero sin especificar categoría: ofrecemos las opciones.
+                if ofrecer_opciones:
+                    # Pidió fotos pero sin categoría ni medida/precio: ofrecemos opciones.
                     logger.info(f"Solicitud sin categoría de {msg.telefono}; se ofrecen opciones")
                     opciones = "\n".join(f"• {c.replace('_', ' ')}" for c in CATEGORIAS)
                     mensaje_opciones = (
