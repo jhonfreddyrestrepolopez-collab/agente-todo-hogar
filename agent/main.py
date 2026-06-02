@@ -24,6 +24,7 @@ from agent.memory import (
     registrar_imagen_enviada,
     obtener_productos,
     obtener_estado_sync,
+    info_base_datos,
 )
 from agent.providers import obtener_proveedor
 from agent.cloudinary_images import (
@@ -148,6 +149,7 @@ async def diagnostico_catalogo():
     total_imgs = sum(c["imagenes_en_cloudinary"] for c in por_categoria.values())
 
     return {
+        "base_de_datos": info_base_datos(),
         "ultima_sincronizacion": await obtener_estado_sync(),
         "1_carpetas_detectadas": len(carpetas),
         "2_nombres_carpetas": carpetas,

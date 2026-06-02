@@ -109,11 +109,22 @@ class SyncInfo(Base):
     resumen: Mapped[str] = mapped_column(Text, nullable=True)
 
 
+def info_base_datos() -> dict:
+    """Devuelve el motor de BD en uso (postgresql/sqlite) y el host."""
+    return {
+        "motor": engine.dialect.name,
+        "host": engine.url.host or "local",
+        "es_postgresql": engine.dialect.name == "postgresql",
+        "es_persistente": engine.dialect.name != "sqlite",
+    }
+
+
 async def inicializar_db():
     """Crea las tablas si no existen."""
     import logging
+    info = info_base_datos()
     logging.getLogger("agentkit").info(
-        f"Base de datos: motor '{engine.dialect.name}' (host: {engine.url.host or 'local'})"
+        f"Base de datos: motor '{info['motor']}' (host: {info['host']})"
     )
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
