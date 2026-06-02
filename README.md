@@ -268,6 +268,99 @@ docker compose logs -f agent
 
 ---
 
+## Catalogo de imagenes (Cloudinary) y comando sync_catalogo
+
+Este agente envia fotos de productos por WhatsApp. Las imagenes viven en **Cloudinary**
+(organizadas en carpetas por categoria) y el agente construye un **catalogo estructurado**
+analizando cada imagen con vision de Claude: extrae **nombre, alto, ancho y precio**, y los
+guarda en **PostgreSQL** para no re-analizar la misma imagen cada vez.
+
+Con esos datos, cuando un cliente pide fotos el agente:
+- envia solo las imagenes que ese cliente **aun no ha recibido**;
+- si pide una **medida**, manda la imagen de medida igual o mas cercana;
+- si pide un **presupuesto**, filtra por precio.
+
+### Actualizar el catalogo manualmente (sync_catalogo)
+
+**No hay sincronizacion automatica periodica.** Tu decides cuando actualizar el catalogo.
+Cada vez que **agregues, reemplaces o elimines** imagenes en Cloudinary, ejecuta el comando
+de administrador `sync_catalogo`. Ese comando:
+
+- detecta imagenes **nuevas** -> las analiza y agrega;
+- detecta imagenes **modificadas** (la URL versionada de Cloudinary cambia al reemplazar) -> las re-analiza;
+- detecta imagenes **eliminadas** -> las quita del catalogo;
+- **solo re-analiza lo nuevo o modificado**; lo que no cambio NO se vuelve a procesar (cero costo de vision);
+- actualiza PostgreSQL y devuelve un **resumen**: `agregados`, `actualizados`, `eliminados`, `sin_cambios`, `total_en_catalogo`.
+
+#### Requisito previo (una sola vez)
+
+En **Railway -> servicio del bot -> Variables**, define un token de administrador:
+
+```
+ADMIN_TOKEN = <una-clave-secreta-larga>
+```
+
+> El comando esta protegido con ese token. Sin `ADMIN_TOKEN` configurado, responde `503`.
+> **Nunca** publiques el token ni lo escribas en este README o en el codigo (se subiria a GitHub).
+
+#### Como ejecutarlo
+
+Reemplaza `TU_ADMIN_TOKEN` por el valor real (el que pusiste en Railway). La URL base es la
+de tu app en Railway (ej. `https://agente-todo-hogar-production.up.railway.app`).
+
+**Opcion 1 — Navegador** (lo mas simple): pega esta URL y presiona Enter:
+```
+https://agente-todo-hogar-production.up.railway.app/admin/sync_catalogo?token=TU_ADMIN_TOKEN
+```
+
+**Opcion 2 — Windows PowerShell:**
+```powershell
+Invoke-RestMethod -Method Post -Uri "https://agente-todo-hogar-production.up.railway.app/admin/sync_catalogo?token=TU_ADMIN_TOKEN"
+```
+
+**Opcion 3 — curl (CMD o PowerShell, usa curl.exe en Windows):**
+```
+curl.exe -X POST "https://agente-todo-hogar-production.up.railway.app/admin/sync_catalogo?token=TU_ADMIN_TOKEN"
+```
+
+El endpoint acepta `GET` (navegador) y `POST` (curl/PowerShell). Respuesta de ejemplo:
+
+```json
+{
+  "status": "ok",
+  "sincronizacion": {
+    "agregados": 2, "actualizados": 1, "eliminados": 0,
+    "sin_cambios": 12, "total_en_catalogo": 15
+  }
+}
+```
+
+### Ver el estado del catalogo (solo lectura)
+
+```
+https://agente-todo-hogar-production.up.railway.app/diagnostico/catalogo
+```
+
+Muestra: motor de base de datos en uso (debe decir `postgresql`), fecha de la ultima
+sincronizacion, carpetas detectadas, imagenes por carpeta, productos analizados, cuantos
+tienen medidas y precio, y el listado completo del catalogo.
+
+### Carpetas en Cloudinary
+
+- Cada **carpeta** = una **categoria** de producto (ej. `closet_2_puertas`, `escritorios`, `mesa de tv`).
+- El descubrimiento de carpetas es **dinamico**: agrega una carpeta nueva en Cloudinary, corre
+  `sync_catalogo` y aparece en el catalogo. No hay que tocar codigo.
+- La carpeta demo `samples` (que Cloudinary crea por defecto) se **ignora** automaticamente.
+
+### Modo humano (atencion manual)
+
+Cuando tu respondes manualmente a un cliente por WhatsApp, ese chat entra en **modo humano**
+y el bot se queda en silencio **solo en esa conversacion** durante 24 horas. Las demas
+conversaciones siguen siendo atendidas por el bot. El chat se reactiva solo despues de 24h
+desde tu ultimo mensaje. El estado se guarda por `chat_id` en PostgreSQL.
+
+---
+
 ## Personalizar tu agente despues
 
 No necesitas tocar codigo. Abre Claude Code y pidele cambios en lenguaje natural:
