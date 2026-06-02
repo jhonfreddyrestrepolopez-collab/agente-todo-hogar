@@ -109,12 +109,12 @@ def _verificar_admin(request: Request):
         raise HTTPException(status_code=401, detail="Token de administrador inválido")
 
 
-@app.post("/admin/sync_catalogo")
+@app.api_route("/admin/sync_catalogo", methods=["GET", "POST"])
 async def admin_sync_catalogo(request: Request):
     """
     Comando MANUAL de administrador: sincroniza el catálogo con Cloudinary
     (nuevas, modificadas y eliminadas) y devuelve el resumen de cambios.
-    Requiere token de administrador.
+    Acepta GET (cómodo desde el navegador) y POST. Requiere token de administrador.
     """
     _verificar_admin(request)
     logger.info("sync_catalogo solicitado por administrador")
