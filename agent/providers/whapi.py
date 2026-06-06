@@ -233,15 +233,36 @@ class ProveedorWhapi(ProveedorWhatsApp):
             "caption": caption,
         }
 
+        # Log de diagnóstico: la URL exacta que se intenta enviar.
+        logger.info(f"Whapi enviar_imagen -> {telefono} | URL: {image_url}")
+
         async with httpx.AsyncClient() as client:
             r = await client.post(url, json=payload, headers=headers)
-            if r.status_code not in (200, 201):
-                logger.error(f"Error Whapi imagen: {r.status_code} — {r.text}")
-                return False
-            # Registramos el id Y el caption de la imagen del bot para ignorar su eco.
-            self._registrar_envio_contenido(telefono, caption)
-            try:
-                await self._registrar_envio_bot(self._extraer_id_respuesta(r.json()))
-            except Exception:
-                pass
-            return True
+
+        # Registramos SIEMPRE la respuesta completa de Whapi (status + cuerpo) para
+        # poder diagnosticar fallos de entrega; el cuerpo se recorta a 500 chars.
+        cuerpo = r.text
+        logger.info(f"Whapi imagen respuesta [{r.status_code}] URL={image_url}: {cuerpo[:500]}")
+
+        if r.status_code not in (200, 201):
+            logger.error(f"Error Whapi imagen ({r.status_code}) URL={image_url}: {cuerpo}")
+            return False
+
+        # Whapi puede devolver 200 con "sent": false cuando NO logró entregar la
+        # imagen. Antes lo tratábamos como éxito (por eso se guardaba el marcador
+        # "[imágenes enviadas...]" sin que llegara ninguna imagen). Lo detectamos.
+        try:
+            data = r.json()
+        except Exception:
+            data = {}
+        if data.get("sent") is False:
+            logger.error(f"Whapi NO envió la imagen (sent=false) URL={image_url}: {cuerpo}")
+            return False
+
+        # Registramos el id Y el caption de la imagen del bot para ignorar su eco.
+        self._registrar_envio_contenido(telefono, caption)
+        try:
+            await self._registrar_envio_bot(self._extraer_id_respuesta(data))
+        except Exception:
+            pass
+        return True

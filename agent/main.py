@@ -340,6 +340,13 @@ async def webhook_handler(request: Request):
                     await proveedor.enviar_mensaje(msg.telefono, aviso)
                     continue
 
+                # Log de diagnóstico: las URLs exactas que se intentarán enviar.
+                logger.info(
+                    "URLs seleccionadas para %s: %s",
+                    msg.telefono,
+                    [p.get("image_url") for p in productos],
+                )
+
                 # Enviar las imágenes seleccionadas (cada una con su caption de catálogo).
                 enviadas = 0
                 for p in productos:

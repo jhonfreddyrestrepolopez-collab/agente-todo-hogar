@@ -7,6 +7,7 @@ y genera respuestas usando la API de Anthropic Claude.
 """
 
 import os
+import re
 import yaml
 import logging
 from anthropic import AsyncAnthropic
@@ -14,6 +15,22 @@ from dotenv import load_dotenv
 
 load_dotenv()
 logger = logging.getLogger("agentkit")
+
+# Marcador interno que main.py guarda en memoria cuando se envían imágenes
+# (ej: "[2 imágenes enviadas: closet_6_puertas]"). NUNCA debe llegar al modelo:
+# Claude lo ve en su propio historial y lo imita, devolviéndolo como texto al
+# cliente (en vez de enviar imágenes reales). Lo reescribimos como nota natural.
+_MARCADOR_IMAGENES = re.compile(
+    r"^\[\s*\d*\s*im[aá]genes?\s+enviadas?:.*\]$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _sanear_para_modelo(contenido: str) -> str:
+    """Reemplaza marcadores internos por una nota natural que el modelo no imita."""
+    if contenido and _MARCADOR_IMAGENES.match(contenido.strip()):
+        return "Le envié al cliente las fotos del catálogo que pidió."
+    return contenido
 
 # Cliente de Anthropic
 client = AsyncAnthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
@@ -64,12 +81,17 @@ async def generar_respuesta(mensaje: str, historial: list[dict]) -> str:
 
     system_prompt = cargar_system_prompt()
 
-    # Construir mensajes para la API
+    # Construir mensajes para la API.
+    # Saneamos los marcadores internos (ej "[2 imágenes enviadas: ...]") para que
+    # el modelo NO los imite y los devuelva como texto al cliente.
     mensajes = []
     for msg in historial:
+        contenido = msg["content"]
+        if msg["role"] == "assistant":
+            contenido = _sanear_para_modelo(contenido)
         mensajes.append({
             "role": msg["role"],
-            "content": msg["content"]
+            "content": contenido
         })
 
     # Agregar el mensaje actual
