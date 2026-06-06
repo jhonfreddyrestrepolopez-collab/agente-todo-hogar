@@ -248,21 +248,26 @@ class ProveedorWhapi(ProveedorWhatsApp):
             logger.error(f"Error Whapi imagen ({r.status_code}) URL={image_url}: {cuerpo}")
             return False
 
-        # Whapi puede devolver 200 con "sent": false cuando NO logró entregar la
-        # imagen. Antes lo tratábamos como éxito (por eso se guardaba el marcador
-        # "[imágenes enviadas...]" sin que llegara ninguna imagen). Lo detectamos.
+        # Exigimos una CONFIRMACIÓN REAL de Whapi: "sent": true o un id de mensaje.
+        # Antes cualquier HTTP 200 contaba como enviado, aunque Whapi respondiera
+        # "sent": false o un cuerpo vacío (por eso se decía "enviado" sin entregar).
         try:
             data = r.json()
         except Exception:
             data = {}
-        if data.get("sent") is False:
-            logger.error(f"Whapi NO envió la imagen (sent=false) URL={image_url}: {cuerpo}")
+        mensaje_id = self._extraer_id_respuesta(data)
+        confirmado = (data.get("sent") is True) or bool(mensaje_id)
+        if not confirmado:
+            logger.error(
+                f"Whapi NO confirmó el envío de la imagen (sent!=true y sin id) "
+                f"URL={image_url}: {cuerpo}"
+            )
             return False
 
         # Registramos el id Y el caption de la imagen del bot para ignorar su eco.
         self._registrar_envio_contenido(telefono, caption)
         try:
-            await self._registrar_envio_bot(self._extraer_id_respuesta(data))
+            await self._registrar_envio_bot(mensaje_id)
         except Exception:
             pass
         return True

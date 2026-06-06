@@ -151,6 +151,28 @@ def solicita_todos_closets(texto: str) -> bool:
     return any(frase in texto_lower for frase in PALABRAS_TODOS_CLOSETS)
 
 
+# Frases que indican que el cliente NO recibió las fotos o pide reenviarlas.
+# Disparan el reenvío de la ÚLTIMA categoría solicitada, SIN mostrar el menú.
+PALABRAS_RECLAMO_FOTOS = [
+    "no me llegaron", "no llegaron las fotos", "no llegaron", "no me llego",
+    "no me llegó", "no me han llegado", "no me llegan", "no llego nada",
+    "no veo las fotos", "no me aparecen", "no aparecen las fotos",
+    "cuales fotos", "cuáles fotos", "que fotos", "qué fotos",
+    "de que fotos", "de qué fotos", "cuales imagenes", "cuáles imágenes",
+    "enviamelas otra vez", "envíamelas otra vez", "mandamelas otra vez",
+    "mándamelas otra vez", "mandalas otra vez", "mándalas otra vez",
+    "mandalas de nuevo", "envialas de nuevo", "envíalas de nuevo",
+    "reenvia", "reenvía", "reenviar", "vuelve a enviar", "vuelve a mandar",
+    "otra vez las fotos", "manda las fotos otra vez", "envia las fotos otra vez",
+]
+
+
+def es_reclamo_fotos(texto: str) -> bool:
+    """True si el cliente dice que no le llegaron las fotos o pide reenviarlas."""
+    texto_lower = texto.lower()
+    return any(frase in texto_lower for frase in PALABRAS_RECLAMO_FOTOS)
+
+
 def detectar_categoria(texto: str) -> str | None:
     """
     Devuelve el nombre de la categoría que coincide con el texto del cliente,

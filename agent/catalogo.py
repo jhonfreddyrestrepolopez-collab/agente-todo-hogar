@@ -380,7 +380,8 @@ def _distancia(producto: dict, alto: float | None, ancho: float | None) -> float
 
 async def elegir_imagenes(texto: str, categorias: list[str] | None, telefono: str,
                           modo_muestra: bool,
-                          max_imgs: int = MAX_IMAGENES_POR_RESPUESTA) -> dict:
+                          max_imgs: int = MAX_IMAGENES_POR_RESPUESTA,
+                          forzar_reenvio: bool = False) -> dict:
     """
     Decide qué productos enviar.
 
@@ -419,6 +420,10 @@ async def elegir_imagenes(texto: str, categorias: list[str] | None, telefono: st
         base = [p for p in base if p["precio"] is not None and p["precio"] <= presupuesto]
 
     enviados = await public_ids_enviados(telefono)
+    if forzar_reenvio:
+        # Reenvío explícito (el cliente pidió las MISMAS fotos otra vez): tratamos
+        # todo como "no enviado" para volver a mandarlas aunque ya las recibiera.
+        enviados = set()
     no_enviados = [p for p in base if p["public_id"] not in enviados]
 
     # 3) Selección según la intención.

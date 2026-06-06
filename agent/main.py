@@ -25,12 +25,15 @@ from agent.memory import (
     obtener_productos,
     obtener_estado_sync,
     info_base_datos,
+    guardar_ultima_categoria,
+    obtener_ultima_categoria,
 )
 from agent.providers import obtener_proveedor
 from agent.cloudinary_images import (
     detectar_categoria,
     solicita_catalogo_completo,
     solicita_todos_closets,
+    es_reclamo_fotos,
     listar_carpetas,
     listar_imagenes,
     CATEGORIAS,
@@ -196,6 +199,65 @@ async def webhook_verificacion(request: Request):
     return {"status": "ok"}
 
 
+# Mensaje al cliente cuando NO se pudo entregar NINGUNA foto por Whapi (error,
+# sent:false, respuesta vacía o sin URL válida). Se acompaña de un log de REPORTE.
+DISCULPA_FOTOS = (
+    "Disculpa, tuve un problema enviando las fotos. "
+    "Ya lo reporté para enviártelas manualmente."
+)
+
+
+async def _enviar_fotos_catalogo(prov, telefono, texto, categorias, modo_muestra,
+                                  forzar_reenvio=False) -> dict:
+    """
+    Selecciona y envía las fotos del catálogo, validando la respuesta REAL de
+    Whapi por cada imagen (enviar_imagen solo devuelve True si Whapi confirma el
+    envío con sent:true / id de mensaje). Registra logs detallados.
+
+    Devuelve {"enviadas", "fallidas", "total", "sin_nuevas"}. NO escribe en el
+    historial ni envía texto: el llamador decide qué responder según el resultado.
+    """
+    seleccion = await elegir_imagenes(
+        texto=texto, categorias=categorias, telefono=telefono,
+        modo_muestra=modo_muestra, forzar_reenvio=forzar_reenvio,
+    )
+    productos = seleccion["productos"]
+    urls = [p.get("image_url") for p in productos]
+    logger.info(
+        "FOTOS | cliente=%s | categoria=%s | reenvio=%s | URLs_encontradas=%s",
+        telefono, categorias, forzar_reenvio, urls,
+    )
+
+    enviadas = 0
+    fallidas = 0
+    for p in productos:
+        url = p.get("image_url")
+        caption = caption_producto(p)
+        if not url:
+            fallidas += 1
+            logger.error("FOTO SIN URL | cliente=%s | public_id=%s", telefono, p.get("public_id"))
+            continue
+        ok = await prov.enviar_imagen(telefono, url, caption)
+        if ok:
+            enviadas += 1
+            await registrar_imagen_enviada(telefono, p["public_id"])
+            logger.info("FOTO ENVIADA OK | cliente=%s | URL=%s", telefono, url)
+        else:
+            fallidas += 1
+            logger.error("FOTO FALLIDA | cliente=%s | URL=%s", telefono, url)
+
+    logger.info(
+        "FOTOS RESULTADO | cliente=%s | enviadas=%d | fallidas=%d | total=%d",
+        telefono, enviadas, fallidas, len(productos),
+    )
+    return {
+        "enviadas": enviadas,
+        "fallidas": fallidas,
+        "total": len(productos),
+        "sin_nuevas": seleccion["sin_nuevas"],
+    }
+
+
 @app.post("/webhook")
 async def webhook_handler(request: Request):
     """
@@ -244,6 +306,52 @@ async def webhook_handler(request: Request):
 
             historial = await obtener_historial(msg.telefono)
             texto_lower = msg.texto.lower()
+
+            # ── RECLAMO / REENVÍO DE FOTOS ────────────────────────────────
+            # Si el cliente dice "no me llegaron", "cuáles fotos", "envíamelas
+            # otra vez", etc., NO mostramos el menú: reenviamos las fotos de la
+            # ÚLTIMA categoría que pidió (forzando el reenvío de las mismas).
+            if es_reclamo_fotos(msg.texto):
+                ultima = await obtener_ultima_categoria(msg.telefono)
+                logger.info(
+                    "RECLAMO/REENVÍO | cliente=%s | last_requested_category=%s",
+                    msg.telefono, ultima,
+                )
+                if ultima and ultima.get("categoria"):
+                    cats = (None if ultima["categoria"] == "__NONE__"
+                            else ultima["categoria"].split(","))
+                    res = await _enviar_fotos_catalogo(
+                        proveedor, msg.telefono, msg.texto, cats,
+                        ultima["modo_muestra"], forzar_reenvio=True,
+                    )
+                    await guardar_mensaje(msg.telefono, "user", msg.texto)
+                    if res["enviadas"] > 0:
+                        nombres = ultima["categoria"].replace(",", ", ").replace(
+                            "__NONE__", "catálogo completo")
+                        await guardar_mensaje(
+                            msg.telefono, "assistant",
+                            f"[{res['enviadas']} imágenes enviadas: {nombres}]",
+                        )
+                    else:
+                        logger.error(
+                            "REPORTE reenvío fallido | cliente=%s | categoria=%s | "
+                            "fallidas=%d/%d",
+                            msg.telefono, ultima["categoria"], res["fallidas"], res["total"],
+                        )
+                        await guardar_mensaje(msg.telefono, "assistant", DISCULPA_FOTOS)
+                        await proveedor.enviar_mensaje(msg.telefono, DISCULPA_FOTOS)
+                    continue
+                # No hay categoría previa registrada: pedimos aclaración BREVE
+                # (no el menú completo), para no cambiar de tema.
+                aviso = (
+                    "¿De cuál producto querías las fotos? Dime la categoría "
+                    "(por ejemplo: clóset de 4 puertas) y te las envío enseguida. 📸"
+                )
+                await guardar_mensaje(msg.telefono, "user", msg.texto)
+                await guardar_mensaje(msg.telefono, "assistant", aviso)
+                await proveedor.enviar_mensaje(msg.telefono, aviso)
+                continue
+            # ──────────────────────────────────────────────────────────────
 
             # Detectar si el cliente está pidiendo fotos/imágenes.
             # Cubre singular/plural y variantes con y sin acento, además de
@@ -313,24 +421,46 @@ async def webhook_handler(request: Request):
                     await proveedor.enviar_mensaje(msg.telefono, mensaje_opciones)
                     continue
 
-                # Selección inteligente desde el catálogo (datos del análisis visual):
-                # solo lo que el cliente no ha recibido, filtrando por medida/precio
-                # cuando los menciona.
-                seleccion = await elegir_imagenes(
-                    texto=msg.texto,
-                    categorias=categorias_a_enviar,
-                    telefono=msg.telefono,
-                    modo_muestra=modo_muestra,
-                )
-                productos = seleccion["productos"]
+                # Recordar la última categoría solicitada (para reclamos/reenvíos).
+                token_cat = ("__NONE__" if categorias_a_enviar is None
+                             else ",".join(categorias_a_enviar))
+                await guardar_ultima_categoria(msg.telefono, token_cat, modo_muestra)
                 logger.info(
-                    f"Selección para {msg.telefono}: {len(productos)} imágenes "
-                    f"(medidas={seleccion['medidas']}, presupuesto={seleccion['presupuesto']}, "
-                    f"sin_nuevas={seleccion['sin_nuevas']})"
+                    "last_requested_category | cliente=%s | categoria=%s | muestra=%s",
+                    msg.telefono, token_cat, modo_muestra,
                 )
 
-                # Si ya recibió todo lo disponible y no quedan nuevas, avisamos por texto.
-                if not productos and seleccion["sin_nuevas"]:
+                # Seleccionar y enviar las fotos, validando la respuesta REAL de Whapi.
+                res = await _enviar_fotos_catalogo(
+                    proveedor, msg.telefono, msg.texto, categorias_a_enviar, modo_muestra
+                )
+
+                # 1) Si se entregó al menos una imagen, NO generamos texto: los únicos
+                #    mensajes que recibe el cliente son las fotos con su caption.
+                if res["enviadas"] > 0:
+                    nombres = token_cat.replace(",", ", ").replace("__NONE__", "catálogo completo")
+                    await guardar_mensaje(msg.telefono, "user", msg.texto)
+                    await guardar_mensaje(
+                        msg.telefono, "assistant",
+                        f"[{res['enviadas']} imágenes enviadas: {nombres}]",
+                    )
+                    continue
+
+                # 2) Había fotos para enviar pero Whapi NO entregó NINGUNA (error,
+                #    sent:false o sin URL válida): NO decimos que se enviaron; pedimos
+                #    disculpa y dejamos el REPORTE en logs para envío manual.
+                if res["total"] > 0:
+                    logger.error(
+                        "REPORTE envío fallido | cliente=%s | categoria=%s | fallidas=%d/%d",
+                        msg.telefono, token_cat, res["fallidas"], res["total"],
+                    )
+                    await guardar_mensaje(msg.telefono, "user", msg.texto)
+                    await guardar_mensaje(msg.telefono, "assistant", DISCULPA_FOTOS)
+                    await proveedor.enviar_mensaje(msg.telefono, DISCULPA_FOTOS)
+                    continue
+
+                # 3) No quedaban fotos NUEVAS: ya recibió todo lo disponible.
+                if res["sin_nuevas"]:
                     aviso = (
                         "Ya te compartí todos los modelos que tengo disponibles de eso 🙌. "
                         "¿Quieres ver otra categoría, o te ayudo con medidas o presupuesto?"
@@ -340,39 +470,11 @@ async def webhook_handler(request: Request):
                     await proveedor.enviar_mensaje(msg.telefono, aviso)
                     continue
 
-                # Log de diagnóstico: las URLs exactas que se intentarán enviar.
-                logger.info(
-                    "URLs seleccionadas para %s: %s",
-                    msg.telefono,
-                    [p.get("image_url") for p in productos],
-                )
-
-                # Enviar las imágenes seleccionadas (cada una con su caption de catálogo).
-                enviadas = 0
-                for p in productos:
-                    caption = caption_producto(p)
-                    if await proveedor.enviar_imagen(msg.telefono, p["image_url"], caption):
-                        enviadas += 1
-                        await registrar_imagen_enviada(msg.telefono, p["public_id"])
-                logger.info(f"Imágenes enviadas a {msg.telefono}: {enviadas}/{len(productos)}")
-
-                # Si se envió al menos una imagen, NO generamos respuesta de texto:
-                # los únicos mensajes que recibe el usuario son las imágenes con su caption.
-                if enviadas > 0:
-                    nombres = ", ".join(p.get("nombre") or p["categoria"] for p in productos)
-                    await guardar_mensaje(msg.telefono, "user", msg.texto)
-                    await guardar_mensaje(
-                        msg.telefono, "assistant", f"[{enviadas} imágenes enviadas: {nombres}]"
-                    )
-                    logger.info(
-                        f"Se omite generación de respuesta porque ya se enviaron imágenes a {msg.telefono}"
-                    )
-                    continue
-
-                # Si no se pudo enviar ninguna imagen, seguimos al flujo normal de texto.
+                # 4) El catálogo no tiene esa categoría (sin sincronizar): seguimos al
+                #    flujo de texto normal (Claude responde abajo).
                 logger.warning(
-                    f"No se enviaron imágenes ({categorias_a_enviar}) a {msg.telefono}; "
-                    "se continúa con respuesta de texto"
+                    f"Sin productos en catálogo para {categorias_a_enviar} "
+                    f"(cliente {msg.telefono}); se continúa con respuesta de texto"
                 )
 
             # Generar respuesta con Claude

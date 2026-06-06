@@ -10,7 +10,7 @@ import os
 from datetime import datetime, timedelta
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy import String, Text, DateTime, select, delete, or_, Integer, Float, UniqueConstraint
+from sqlalchemy import String, Text, DateTime, select, delete, or_, Integer, Float, Boolean, UniqueConstraint
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -55,6 +55,23 @@ class ChatEstado(Base):
 
     telefono: Mapped[str] = mapped_column(String(50), primary_key=True)
     human_takeover_until: Mapped[datetime] = mapped_column(DateTime, nullable=True)
+
+
+class UltimaCategoria(Base):
+    """
+    Última categoría de fotos que pidió cada cliente. Permite REENVIAR las mismas
+    fotos cuando el cliente dice "no me llegaron" / "envíamelas otra vez", sin
+    volver a mostrar el menú de categorías.
+
+    `categoria` es un token: el nombre de la categoría (o varias separadas por
+    coma), o "__NONE__" para indicar "todo el catálogo".
+    """
+    __tablename__ = "ultima_categoria"
+
+    telefono: Mapped[str] = mapped_column(String(50), primary_key=True)
+    categoria: Mapped[str] = mapped_column(String(255), nullable=True)
+    modo_muestra: Mapped[bool] = mapped_column(Boolean, default=False)
+    actualizado_en: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
 class MensajeBot(Base):
@@ -317,6 +334,28 @@ async def registrar_imagen_enviada(telefono: str, public_id: str):
         if ya.scalars().first() is None:
             session.add(ImagenEnviada(telefono=telefono, public_id=public_id))
             await session.commit()
+
+
+async def guardar_ultima_categoria(telefono: str, categoria: str, modo_muestra: bool = False):
+    """Guarda (o actualiza) la última categoría de fotos que pidió el cliente."""
+    async with async_session() as session:
+        row = await session.get(UltimaCategoria, telefono)
+        if row is None:
+            row = UltimaCategoria(telefono=telefono)
+            session.add(row)
+        row.categoria = categoria
+        row.modo_muestra = bool(modo_muestra)
+        row.actualizado_en = datetime.utcnow()
+        await session.commit()
+
+
+async def obtener_ultima_categoria(telefono: str) -> dict | None:
+    """Devuelve {'categoria', 'modo_muestra'} de la última solicitud, o None."""
+    async with async_session() as session:
+        row = await session.get(UltimaCategoria, telefono)
+        if row is None or not row.categoria:
+            return None
+        return {"categoria": row.categoria, "modo_muestra": bool(row.modo_muestra)}
 
 
 async def guardar_mensaje(telefono: str, role: str, content: str):
