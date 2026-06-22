@@ -7,6 +7,7 @@ Funciona con cualquier proveedor gracias a la capa de providers (aquí: Whapi.Cl
 """
 
 import os
+import re
 import asyncio
 import logging
 from contextlib import asynccontextmanager
@@ -199,6 +200,52 @@ async def webhook_verificacion(request: Request):
     return {"status": "ok"}
 
 
+# ── TRANSFERENCIA A HUMANO ───────────────────────────────────────────────────
+# 1) El CLIENTE pide un asesor humano. Palabras sueltas con riesgo de falso positivo
+#    (persona, asesor, vendedor...) se buscan con límites de palabra; las frases
+#    claras se buscan como subcadena.
+_PIDE_HUMANO_RE = re.compile(
+    r"\b(asesor|asesora|asesores|persona|humano|humana|vendedor|vendedora|"
+    r"encargad[oa]|administrador|administradora|gerente)\b",
+    re.IGNORECASE,
+)
+_PIDE_HUMANO_FRASES = (
+    "alguien que me atienda", "hablar con alguien", "hablar con una persona",
+    "quiero hablar con alguien", "quiero hablar con una persona",
+    "que me atienda una persona", "atencion humana", "atención humana",
+    "agente humano", "con un asesor", "con una persona", "atienda alguien",
+)
+
+
+def cliente_pide_humano(texto: str) -> bool:
+    """True si el cliente pide hablar con un asesor / persona / humano."""
+    t = (texto or "").lower()
+    if any(f in t for f in _PIDE_HUMANO_FRASES):
+        return True
+    return bool(_PIDE_HUMANO_RE.search(t))
+
+
+# 2) El BOT escribe algo que implica que una PERSONA continuará la conversación.
+#    Cuando el bot diga una de estas frases, activamos modo humano y queda en silencio.
+_FRASES_HANDOFF_BOT = (
+    "voy a consultar", "voy a verificar", "voy a confirmar",
+    "permíteme consultar", "permiteme consultar", "permítame consultar", "permitame consultar",
+    "déjame consultar", "dejame consultar", "déjame confirmar", "dejame confirmar",
+    "déjame confirmarlo", "dejame confirmarlo",
+    "consultar con el equipo", "consultarlo con el equipo", "confirmarlo con el equipo",
+    "lo confirmo con el equipo", "con el equipo", "verificar esta información",
+    "verificar esta informacion", "confirmar el dato",
+    "conectarte con alguien", "con alguien de nuestro equipo", "te conecto con",
+    "escalar al equipo", "lo escalo",
+)
+
+
+def respuesta_implica_handoff(texto: str) -> bool:
+    """True si la respuesta del bot implica que un humano continuará la conversación."""
+    t = (texto or "").lower()
+    return any(f in t for f in _FRASES_HANDOFF_BOT)
+
+
 # Mensaje al cliente cuando NO se pudo entregar NINGUNA foto por Whapi (error,
 # sent:false, respuesta vacía o sin URL válida). Se acompaña de un log de REPORTE.
 DISCULPA_FOTOS = (
@@ -295,6 +342,21 @@ async def webhook_handler(request: Request):
                 logger.info(
                     f"Modo humano ACTIVO para {msg.telefono}: bot en silencio, "
                     f"no se responde a: {msg.texto}"
+                )
+                continue
+            # ──────────────────────────────────────────────────────────────
+
+            # 3) Si el CLIENTE pide un asesor humano, el bot deja de responder de
+            #    inmediato en este chat y activa modo humano (un humano continúa).
+            if cliente_pide_humano(msg.texto):
+                await guardar_mensaje(msg.telefono, "user", msg.texto)
+                aviso = "¡Claro! En un momento te atiende un asesor de nuestro equipo. 🙌"
+                await guardar_mensaje(msg.telefono, "assistant", aviso)
+                await proveedor.enviar_mensaje(msg.telefono, aviso)
+                hasta = await activar_modo_humano(msg.telefono)
+                logger.info(
+                    "Cliente pidió ASESOR HUMANO → modo humano para %s hasta %s UTC",
+                    msg.telefono, hasta.isoformat(),
                 )
                 continue
             # ──────────────────────────────────────────────────────────────
@@ -488,6 +550,16 @@ async def webhook_handler(request: Request):
             await proveedor.enviar_mensaje(msg.telefono, respuesta)
 
             logger.info(f"Respuesta a {msg.telefono}: {respuesta}")
+
+            # Si la respuesta del bot implica que un HUMANO continuará (ej. "voy a
+            # consultar con el equipo"), activamos modo humano: el bot se calla y deja
+            # la conversación a una persona.
+            if respuesta_implica_handoff(respuesta):
+                hasta = await activar_modo_humano(msg.telefono)
+                logger.info(
+                    "Respuesta del bot implica HANDOFF → modo humano para %s hasta %s UTC",
+                    msg.telefono, hasta.isoformat(),
+                )
 
         return {"status": "ok"}
 
